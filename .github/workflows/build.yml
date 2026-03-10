@@ -1,0 +1,63 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --noconsole `
+            --name "Cube-Data-Changer-AIO" `
+            --icon="icon.ico" `
+            --add-data "logo.png;." `
+            --add-data "icon.ico;." `
+            --collect-all customtkinter `
+            --collect-all openpyxl `
+            --hidden-import=PIL `
+            --hidden-import=numpy `
+            --hidden-import=pandas `
+            app.py
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          tag_name: ${{ github.ref_name }}
+          name: "Cube Data Changer AIO ${{ github.ref_name }}"
+          body: |
+            ## Cube Data Changer AIO ${{ github.ref_name }}
+            
+            **All-in-One** tool that merges Cube Data Generator + Cube Data Processor.
+            
+            ### Features
+            - Auto-generate concrete (M10-M45) and mortar (1:4, 1:6) test data
+            - Process office templates with generated or existing grade data
+            - Calendar date processing (7-day / 28-day)
+            - Modern dark mode UI
+            - No intermediate Excel files needed
+            
+            ### Download
+            Download the `.exe` file below and run it directly — no Python installation required.
+          draft: false
+          prerelease: false
