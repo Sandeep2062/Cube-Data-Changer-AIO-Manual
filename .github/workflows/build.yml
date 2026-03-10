@@ -28,7 +28,7 @@ jobs:
       - name: Build EXE
         run: |
           pyinstaller --onefile --noconsole `
-            --name "Cube-Data-Changer-AIO" `
+            --name "Cube-Data-Changer-AIO-M" `
             --icon="icon.ico" `
             --add-data "logo.png;." `
             --add-data "icon.ico;." `
