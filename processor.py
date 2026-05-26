@@ -268,9 +268,11 @@ def apply_generated_grades(office_wb, selected_grades, num_rows, log, progress_c
 
 def apply_generated_grades_from_template(office_wb, log, progress_cb=None, cell_map=None):
     """
-    Auto mode: read each sheet's grade cell, detect grade/type, generate one row,
-    and write directly into that sheet.
+    Auto mode: read each sheet's grade cell, detect grade/type, group sheets by grade,
+    generate rows, and write directly into those sheets.
     """
+    from collections import defaultdict
+    
     cm = _get_cell_map(cell_map)
     grade_cell = cm["grade_cell"]
     w_row = int(cm["weight_row"])
@@ -299,22 +301,29 @@ def apply_generated_grades_from_template(office_wb, log, progress_cb=None, cell_
         log(f"  ⚠ No supported grades/types found in {grade_cell} cells")
         return 0
 
-    for i, (sheet_name, grade) in enumerate(supported_sheets):
-        ws = office_wb[sheet_name]
-        weights, s7d, s28d = next(generate_rows(grade, 1))
+    grade_to_sheets = defaultdict(list)
+    for sheet_name, grade in supported_sheets:
+        grade_to_sheets[grade].append(sheet_name)
 
-        for idx, value in enumerate(weights[:w_count]):
-            ws.cell(row=w_row, column=w_col + idx, value=value)
-        for idx, value in enumerate(s7d[:s7_count]):
-            ws.cell(row=s7_row, column=s7_col + idx, value=value)
-        for idx, value in enumerate(s28d[:s28_count]):
-            ws.cell(row=s28_row, column=s28_col + idx, value=value)
+    processed_count = 0
+    for grade, sheets in grade_to_sheets.items():
+        gen = generate_rows(grade, len(sheets))
+        for sheet_name, (weights, s7d, s28d) in zip(sheets, gen):
+            ws = office_wb[sheet_name]
 
-        total += 1
-        log(f"    ✓ {sheet_name} filled ({grade_display_name(grade)})")
+            for idx, value in enumerate(weights[:w_count]):
+                ws.cell(row=w_row, column=w_col + idx, value=value)
+            for idx, value in enumerate(s7d[:s7_count]):
+                ws.cell(row=s7_row, column=s7_col + idx, value=value)
+            for idx, value in enumerate(s28d[:s28_count]):
+                ws.cell(row=s28_row, column=s28_col + idx, value=value)
 
-        if progress_cb:
-            progress_cb((i + 1) / total_supported * 0.8)
+            total += 1
+            processed_count += 1
+            log(f"    ✓ {sheet_name} filled ({grade_display_name(grade)})")
+
+            if progress_cb:
+                progress_cb(processed_count / total_supported * 0.8)
 
     return total
 

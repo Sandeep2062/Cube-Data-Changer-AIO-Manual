@@ -586,13 +586,17 @@ class CubeDataChangerAIO:
     # ── Logging ─────────────────────────────────────────────────────────────
 
     def _log(self, msg):
-        self.log_box.insert("end", msg + "\n")
-        self.log_box.see("end")
-        self.root.update_idletasks()
+        def _do_log():
+            self.log_box.insert("end", msg + "\n")
+            self.log_box.see("end")
+            self.root.update_idletasks()
+        self.root.after(0, _do_log)
 
     def _set_progress(self, val):
-        self.progress.set(max(0, min(1, val)))
-        self.root.update_idletasks()
+        def _do_progress():
+            self.progress.set(max(0, min(1, val)))
+            self.root.update_idletasks()
+        self.root.after(0, _do_progress)
 
     # ── Processing ──────────────────────────────────────────────────────────
 

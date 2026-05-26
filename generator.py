@@ -70,14 +70,20 @@ def _generate_biased_values(min_val, max_val, count, target_avg, decimals=2, min
     target_avg while keeping values within [min_val, max_val].
     """
     full_range = max_val - min_val
-    half_span = full_range * 0.25  # use ~50% of the range as the sub-window
+    # Minimum sub-window must fit count values with min_gap between them
+    min_window = min_gap * (count + 1) * 2
+    half_span = max(full_range * 0.25, min_window / 2)
+
+    # If the range is too small for biasing, just use the full range
+    if half_span * 2 >= full_range:
+        return _generate_unique_values(min_val, max_val, count, decimals, min_gap)
 
     # Center the sub-window around target_avg, clamped to stay within bounds
     sub_center = np.clip(target_avg, min_val + half_span, max_val - half_span)
     sub_min = max(min_val, sub_center - half_span)
     sub_max = min(max_val, sub_center + half_span)
 
-    # Ensure sub_min < sub_max
+    # Final safety: ensure sub-window can actually hold count values with min_gap
     if sub_max - sub_min < min_gap * count:
         sub_min = min_val
         sub_max = max_val
@@ -91,11 +97,22 @@ def _generate_biased_values(min_val, max_val, count, target_avg, decimals=2, min
             values.append(val)
         attempts += 1
 
-    # Fallback – nudge duplicates
-    while len(values) < count:
-        val = values[-1] + round(np.random.uniform(0.001, 0.009), 3)
+    # Fallback: if sub-window failed, try full range
+    if len(values) < count:
+        attempts = 0
+        while len(values) < count and attempts < max_attempts:
+            val = round(np.random.uniform(min_val, max_val), decimals)
+            if val not in values and all(abs(val - v) >= min_gap for v in values):
+                values.append(val)
+            attempts += 1
+
+    # Last resort: nudge from last value
+    fallback_attempts = 0
+    while len(values) < count and fallback_attempts < 500:
+        val = round(values[-1] + np.random.uniform(0.01, min_gap * 1.5 if min_gap > 0 else 0.1), decimals)
         if min_val <= val <= max_val and val not in values:
-            values.append(round(val, decimals))
+            values.append(val)
+        fallback_attempts += 1
 
     return values[:count]
 
