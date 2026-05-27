@@ -62,59 +62,42 @@ def _generate_unique_values(min_val, max_val, count, decimals=2, min_gap=0.0):
 
 def _generate_biased_values(min_val, max_val, count, target_avg, decimals=2, min_gap=0.0):
     """
-    Generate *count* unique random values in [min_val, max_val] whose average
-    is biased toward *target_avg*, producing noticeably different averages
-    across successive calls with different targets.
-
-    The strategy: shift the sampling sub-range so its center aligns with
-    target_avg while keeping values within [min_val, max_val].
+    Generate *count* (specifically optimized for 3) random values whose average
+    is exactly biased toward *target_avg*, and the values are vastly spread out.
     """
-    full_range = max_val - min_val
-    # Minimum sub-window must fit count values with min_gap between them
-    min_window = min_gap * count * 1.5
-    half_span = max(full_range * 0.15, min_window / 2.0)
-
-    # If the range is too small for biasing, just use the full range
-    if half_span * 2 >= full_range:
+    if count != 3:
         return _generate_unique_values(min_val, max_val, count, decimals, min_gap)
 
-    # Center the sub-window around target_avg, clamped to stay within bounds
-    sub_center = np.clip(target_avg, min_val + half_span, max_val - half_span)
-    sub_min = max(min_val, sub_center - half_span)
-    sub_max = min(max_val, sub_center + half_span)
-
-    # Final safety: ensure sub-window can actually hold count values with min_gap
-    if sub_max - sub_min < min_gap * count:
-        sub_min = min_val
-        sub_max = max_val
-
-    values = []
-    max_attempts = 3000
-    attempts = 0
-    while len(values) < count and attempts < max_attempts:
-        val = round(np.random.uniform(sub_min, sub_max), decimals)
-        if val not in values and all(abs(val - v) >= min_gap for v in values):
-            values.append(val)
-        attempts += 1
-
-    # Fallback: if sub-window failed, try full range
-    if len(values) < count:
-        attempts = 0
-        while len(values) < count and attempts < max_attempts:
-            val = round(np.random.uniform(min_val, max_val), decimals)
-            if val not in values and all(abs(val - v) >= min_gap for v in values):
-                values.append(val)
-            attempts += 1
-
-    # Last resort: nudge from last value
-    fallback_attempts = 0
-    while len(values) < count and fallback_attempts < 500:
-        val = round(values[-1] + np.random.uniform(0.01, min_gap * 1.5 if min_gap > 0 else 0.1), decimals)
-        if min_val <= val <= max_val and val not in values:
-            values.append(val)
-        fallback_attempts += 1
-
-    return values[:count]
+    # Determine a massive spread to force the 3 numbers to be vastly different
+    is_mortar = (min_val < 100)
+    spread_min = 4.0 if is_mortar else 30.0
+    spread_max = 9.0 if is_mortar else 60.0
+    
+    total_spread = np.random.uniform(spread_min, spread_max)
+    
+    # We want: low, middle, high
+    low = target_avg - (total_spread / 2) + np.random.uniform(-1, 1)
+    high = target_avg + (total_spread / 2) + np.random.uniform(-1, 1)
+    
+    # Calculate middle to perfectly hit the target_avg
+    mid = (target_avg * 3) - low - high
+    
+    # Add minor balanced jitter so it's not strictly linear
+    j1 = np.random.uniform(-2, 2) if not is_mortar else np.random.uniform(-0.5, 0.5)
+    j2 = np.random.uniform(-2, 2) if not is_mortar else np.random.uniform(-0.5, 0.5)
+    
+    low += j1
+    high += j2
+    mid -= (j1 + j2)
+    
+    values = [round(low, decimals), round(mid, decimals), round(high, decimals)]
+    
+    # Optional safety clamp if they exceed absolute bounds by too much,
+    # but the user explicitly requested values like 435 / 496 for a 442-490 range,
+    # so we allow them to go outside the theoretical limits to achieve the vast spread.
+    
+    np.random.shuffle(values)
+    return values
 
 
 def generate_row(grade_or_type):
@@ -139,10 +122,13 @@ def generate_row(grade_or_type):
     weights = _generate_unique_values(w_min, w_max, 6, decimals=weight_decimals, min_gap=weight_gap)
     np.random.shuffle(weights)
 
-    strength_7d = _generate_unique_values(s7_min, s7_max, 3, decimals=2, min_gap=strength_gap)
+    t7 = np.random.uniform(s7_min + (s7_max - s7_min) * 0.1, s7_max - (s7_max - s7_min) * 0.1)
+    t28 = np.random.uniform(s28_min + (s28_max - s28_min) * 0.1, s28_max - (s28_max - s28_min) * 0.1)
+
+    strength_7d = _generate_biased_values(s7_min, s7_max, 3, t7, decimals=2, min_gap=strength_gap)
     np.random.shuffle(strength_7d)
 
-    strength_28d = _generate_unique_values(s28_min, s28_max, 3, decimals=2, min_gap=strength_gap)
+    strength_28d = _generate_biased_values(s28_min, s28_max, 3, t28, decimals=2, min_gap=strength_gap)
     np.random.shuffle(strength_28d)
 
     return weights, strength_7d, strength_28d
