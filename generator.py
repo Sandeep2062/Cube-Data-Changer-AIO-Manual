@@ -71,8 +71,8 @@ def _generate_biased_values(min_val, max_val, count, target_avg, decimals=2, min
     """
     full_range = max_val - min_val
     # Minimum sub-window must fit count values with min_gap between them
-    min_window = min_gap * (count + 1) * 2
-    half_span = max(full_range * 0.25, min_window / 2)
+    min_window = min_gap * count * 1.5
+    half_span = max(full_range * 0.15, min_window / 2.0)
 
     # If the range is too small for biasing, just use the full range
     if half_span * 2 >= full_range:
@@ -134,7 +134,7 @@ def generate_row(grade_or_type):
     is_mortar = grade_or_type in MORTAR_TYPES
     weight_decimals = 3
     weight_gap = 0.005 if is_mortar else 0.015
-    strength_gap = 1.0 if is_mortar else 5.0
+    strength_gap = 1.0 if is_mortar else 2.0
 
     weights = _generate_unique_values(w_min, w_max, 6, decimals=weight_decimals, min_gap=weight_gap)
     np.random.shuffle(weights)
@@ -160,7 +160,7 @@ def generate_rows(grade_or_type, count):
     s28_min, s28_max = STRENGTH_28D_RANGES[grade_or_type]
 
     is_mortar = grade_or_type in MORTAR_TYPES
-    strength_gap = 1.0 if is_mortar else 5.0
+    strength_gap = 1.0 if is_mortar else 2.0
 
     # Divide the strength range into *count* zones (or at least 3 zones)
     # and assign each row a different target average from a different zone.
