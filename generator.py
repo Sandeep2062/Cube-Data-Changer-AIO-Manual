@@ -119,30 +119,42 @@ _MORTAR_THRESH_28D = {
 # Weight generation -- single-pass, gap-enforced
 # ============================================================================
 
-def _gen_weights(w_min, w_max, count, min_gap, decimals=3):
+def _gen_weights(w_min, w_max, count, min_gap, is_mortar, decimals=3):
     """
     Generate *count* weights in [w_min, w_max] with every adjacent sorted pair
     at least *min_gap* apart.
 
-    Strategy: evenly space base points, add bounded jitter, then enforce gap
-    by nudging forward.  No retry loop needed -- O(count) always.
+    Uses a perfect random placement algorithm:
+    1. Calculate required width for gaps.
+    2. Expand w_max dynamically if there is not enough slack for randomness.
+    3. Generate sorted random points in the slack space.
     """
-    max_possible_gap = (w_max - w_min) / (count - 1)
-    gap = min(min_gap, max_possible_gap * 0.97)
+    required_width = (count - 1) * min_gap
+    slack = w_max - w_min - required_width
+    
+    # Ensure there is enough slack so the weights are highly random
+    # instead of ending exactly in 0s.
+    min_slack = 0.005 if is_mortar else 0.040
+    if slack < min_slack:
+        w_max = w_min + required_width + min_slack
+        slack = min_slack
 
-    base  = np.linspace(w_min, w_max, count)
-    slack = max(0.0, (max_possible_gap - gap) * 0.40)
-    pts   = np.clip(base + _rng.uniform(-slack, slack, count), w_min, w_max)
-    pts   = np.sort(pts)
-
-    # Enforce gap by nudging forward
+    random_sorted = np.sort(_rng.uniform(0, slack, count))
+    pts = w_min + random_sorted + np.arange(count) * min_gap
+    pts = np.round(pts, decimals)
+    
+    # Enforce minimum gap exactly post-rounding
     for i in range(1, count):
-        if pts[i] - pts[i - 1] < gap:
-            pts[i] = pts[i - 1] + gap
-    # If we overflowed, shift everything left
+        if pts[i] - pts[i - 1] < min_gap:
+            pts[i] = pts[i - 1] + min_gap
+            
+    # Clamp if nudging pushed it past the expanded w_max
     if pts[-1] > w_max:
-        pts -= pts[-1] - w_max
-        pts  = np.clip(pts, w_min, w_max)
+        pts -= (pts[-1] - w_max)
+        pts = np.round(pts, decimals)
+        for i in range(1, count):
+            if pts[i] - pts[i - 1] < min_gap:
+                pts[i] = pts[i - 1] + min_gap
 
     pts = np.round(pts, decimals).tolist()
     _rng.shuffle(pts)
@@ -279,7 +291,7 @@ def generate_row(grade_or_type):
     s7_min, s7_max  = STRENGTH_7D_RANGES[grade_or_type]
     s28_min, s28_max = STRENGTH_28D_RANGES[grade_or_type]
 
-    weights      = _gen_weights(w_min, w_max, 6, weight_gap)
+    weights      = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
     t7           = float(_rng.uniform(s7_min,  s7_max))
     t28          = float(_rng.uniform(s28_min, s28_max))
     strength_7d  = _gen_strengths(s7_min,  s7_max,  t7,  strength_gap)
@@ -325,12 +337,22 @@ def generate_rows(grade_or_type, count):
 
     prev_avg_7d  = None
     prev_avg_28d = None
+    prev_weights = set()
 
     MAX_RETRIES = 15
 
     for _ in range(count):
-        # ---------- Weights (no retry needed) --------------------------------
-        weights = _gen_weights(w_min, w_max, 6, weight_gap)
+        # ---------- Weights (ensure no cross-sheet overlap) ------------------
+        weights = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
+        
+        # Give it up to 10 attempts to find completely disjoint weights
+        for _attempt in range(10):
+            if prev_weights and any(w in prev_weights for w in weights):
+                weights = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
+            else:
+                break
+                
+        prev_weights = set(weights)
 
         # ---------- 7-day strengths ------------------------------------------
         target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
