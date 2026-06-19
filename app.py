@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import time
 import webbrowser
 
 import customtkinter as ctk
@@ -45,7 +46,10 @@ TEXT_SECONDARY = "#a1a1aa"
 TEXT_DIM       = "#71717a"
 BORDER_COLOR   = "#27272a"
 
-VERSION = "2.0.0 Manual"
+VERSION = "2.1.0 Manual"
+
+# ── Log buffer interval (ms) — controls how often buffered logs are flushed ─
+_LOG_FLUSH_INTERVAL_MS = 100
 
 
 def resource_path(relative_path):
@@ -75,6 +79,12 @@ class CubeDataChangerAIO:
         # State
         self._load_settings()
         self.processing = False
+        self._cancel_event = threading.Event()
+
+        # Log buffer for throttled UI updates
+        self._log_buffer = []
+        self._log_lock = threading.Lock()
+        self._log_flush_scheduled = False
 
         # Build UI
         self._build_ui()
@@ -293,6 +303,15 @@ class CubeDataChangerAIO:
             text_color="white", corner_radius=12,
             command=self._run)
         self.start_btn.grid(row=0, column=0, sticky="ew")
+
+        # Cancel button (hidden by default, shown during processing)
+        self.cancel_btn = ctk.CTkButton(
+            btn_frame, text="✖  CANCEL",
+            font=ctk.CTkFont(size=14, weight="bold"), height=40,
+            fg_color=RED, hover_color=RED_HOVER,
+            text_color="white", corner_radius=10,
+            command=self._cancel_processing)
+        # Not shown initially
 
         # Progress
         self.progress = ctk.CTkProgressBar(
@@ -583,20 +602,54 @@ class CubeDataChangerAIO:
             for f in self.legacy_grade_files:
                 self._legacy_listbox.insert("end", f"  📄 {os.path.basename(f)}\n")
 
-    # ── Logging ─────────────────────────────────────────────────────────────
+    # ── Buffered Logging ────────────────────────────────────────────────────
 
     def _log(self, msg):
-        def _do_log():
-            self.log_box.insert("end", msg + "\n")
+        """
+        Thread-safe buffered logging. Messages are collected in a buffer and
+        flushed to the UI every _LOG_FLUSH_INTERVAL_MS milliseconds to prevent
+        the UI from freezing when processing large files (1000+ sheets).
+        """
+        with self._log_lock:
+            self._log_buffer.append(msg)
+
+        # Schedule a flush if one isn't already pending
+        if not self._log_flush_scheduled:
+            self._log_flush_scheduled = True
+            self.root.after(_LOG_FLUSH_INTERVAL_MS, self._flush_log_buffer)
+
+    def _flush_log_buffer(self):
+        """Flush all buffered log messages to the UI textbox at once."""
+        with self._log_lock:
+            messages = list(self._log_buffer)
+            self._log_buffer.clear()
+            self._log_flush_scheduled = False
+
+        if messages:
+            # Insert all messages at once for better performance
+            combined = "\n".join(messages) + "\n"
+            self.log_box.insert("end", combined)
             self.log_box.see("end")
-            self.root.update_idletasks()
-        self.root.after(0, _do_log)
+
+        # If there are still messages arriving (processing ongoing), schedule next flush
+        with self._log_lock:
+            if self._log_buffer and not self._log_flush_scheduled:
+                self._log_flush_scheduled = True
+                self.root.after(_LOG_FLUSH_INTERVAL_MS, self._flush_log_buffer)
 
     def _set_progress(self, val):
         def _do_progress():
             self.progress.set(max(0, min(1, val)))
-            self.root.update_idletasks()
         self.root.after(0, _do_progress)
+
+    # ── Cancel support ──────────────────────────────────────────────────────
+
+    def _cancel_processing(self):
+        """Signal the processing thread to stop."""
+        if self.processing:
+            self._cancel_event.set()
+            self._log("  ⚠ Cancellation requested — finishing current sheet...")
+            self.cancel_btn.configure(state="disabled", text="⏳  Cancelling...")
 
     # ── Processing ──────────────────────────────────────────────────────────
 
@@ -631,8 +684,14 @@ class CubeDataChangerAIO:
             return
 
         self.processing = True
+        self._cancel_event.clear()
+
         self.start_btn.configure(state="disabled", text="⏳  Processing...",
                                  fg_color="#3f3f46")
+        # Show cancel button
+        self.cancel_btn.configure(state="normal", text="✖  CANCEL")
+        self.cancel_btn.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
         self.log_box.delete("0.0", "end")
         self.progress.set(0)
         self._save_settings()
@@ -654,29 +713,45 @@ class CubeDataChangerAIO:
                     calendar_file=calendar,
                     progress_cb=self._set_progress,
                     cell_map=self.cell_map,
+                    cancel_event=self._cancel_event,
                 )
-                self.root.after(0, lambda: self._on_done(total))
+                cancelled = self._cancel_event.is_set()
+                self.root.after(0, lambda: self._on_done(total, cancelled))
             except Exception as e:
                 self.root.after(0, lambda: self._on_error(str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_done(self, total):
+    def _on_done(self, total, cancelled=False):
         self.processing = False
         self.progress.set(1.0)
         self.start_btn.configure(state="normal", text="▶   START PROCESSING",
                                  fg_color=GREEN)
-        self._log(f"\n✅ Processing complete — {total} operations performed")
+        # Hide cancel button
+        self.cancel_btn.grid_remove()
 
-        # Sound (Windows only, silently ignored elsewhere)
-        try:
-            import winsound
-            winsound.MessageBeep()
-        except Exception:
-            pass
+        # Flush any remaining log messages
+        self._flush_log_buffer()
 
-        messagebox.showinfo("✓ Complete",
-                            f"Processing finished!\n\nTotal operations: {total}")
+        if cancelled:
+            self._log(f"\n⚠ Processing cancelled — {total} operations completed before cancellation")
+            messagebox.showwarning("Cancelled",
+                                    f"Processing was cancelled.\n\n"
+                                    f"Partial operations: {total}\n"
+                                    f"(File was saved with partial results)")
+        else:
+            self._log(f"\n✅ Processing complete — {total} operations performed")
+
+            # Sound (Windows only, silently ignored elsewhere)
+            try:
+                import winsound
+                winsound.MessageBeep()
+            except Exception:
+                pass
+
+            messagebox.showinfo("✓ Complete",
+                                f"Processing finished!\n\nTotal operations: {total}")
+
         self.progress.set(0)
 
     def _on_error(self, err):
@@ -684,6 +759,12 @@ class CubeDataChangerAIO:
         self.progress.set(0)
         self.start_btn.configure(state="normal", text="▶   START PROCESSING",
                                  fg_color=GREEN)
+        # Hide cancel button
+        self.cancel_btn.grid_remove()
+
+        # Flush any remaining log messages
+        self._flush_log_buffer()
+
         self._log(f"\n✖ ERROR: {err}")
         messagebox.showerror("Error", f"Processing failed:\n{err}")
 
