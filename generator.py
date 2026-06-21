@@ -170,8 +170,8 @@ def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
     Generate exactly 3 strength values in [s_min, s_max] whose mean is
     *approximately* target_raw, with each adjacent sorted pair >= min_gap apart.
 
-    Uses a random simplex sampling approach to guarantee vast randomness and 
-    avoid repetitive, predictable values, while mathematically respecting constraints.
+    Uses a perfect O(1) slack-partitioning algorithm to guarantee vast randomness
+    without any rejection sampling or loops.
     """
     # Clamp target_raw to the mathematically solvable domain
     min_possible_mean = s_min + min_gap
@@ -182,42 +182,47 @@ def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
     else:
         target_raw = np.clip(target_raw, min_possible_mean, max_possible_mean)
         
-    d1_min_possible = s_min - target_raw
-    d1_max_possible = -min_gap
+    # We partition the slack exactly
+    S = 3.0 * target_raw
+    total_slack = s_max - s_min - 2.0 * min_gap
+    K = S - 3.0 * s_min - 3.0 * min_gap
     
-    # Try sampling valid offsets
-    for _ in range(50):
-        d1 = _rng.uniform(d1_min_possible, d1_max_possible)
+    # Clip K for floating point safety
+    K = np.clip(K, 0.0, 3.0 * total_slack)
+    
+    # x1 represents the slack of the lowest value
+    x1_min = max(0.0, K - 2.0 * total_slack)
+    x1_max = K / 3.0
+    x1 = _rng.uniform(x1_min, x1_max)
+    
+    # x2 represents the slack of the middle value
+    x2_min = max(0.0, K - total_slack - 2.0 * x1)
+    x2_max = (K - 3.0 * x1) / 2.0
+    x2 = _rng.uniform(x2_min, x2_max)
+    
+    # x3 represents the slack of the highest value
+    x3 = K - 3.0 * x1 - 2.0 * x2
+    
+    # Construct values
+    v1 = s_min + x1
+    v2 = v1 + min_gap + x2
+    v3 = v2 + min_gap + x3
+    
+    vals = [v1, v2, v3]
+    vals = np.round(vals, decimals)
+    
+    # Enforce gaps post-rounding strictly
+    if vals[1] - vals[0] < min_gap:
+        vals[1] = vals[0] + min_gap
+    if vals[2] - vals[1] < min_gap:
+        vals[2] = vals[1] + min_gap
         
-        min_d3 = max(-d1 / 2.0 + min_gap / 2.0, target_raw - s_max - d1)
-        max_d3 = min(-2.0 * d1 - min_gap, s_max - target_raw, target_raw - s_min - d1)
+    # Clamp overflow (should only occur due to rounding)
+    if vals[2] > s_max:
+        vals[2] = s_max
+        vals[1] = min(vals[1], round(s_max - min_gap, decimals))
+        vals[0] = min(vals[0], round(s_max - 2.0 * min_gap, decimals))
         
-        if min_d3 <= max_d3:
-            d3 = _rng.uniform(min_d3, max_d3)
-            d2 = -(d1 + d3)
-            
-            vals = [target_raw + d1, target_raw + d2, target_raw + d3]
-            vals = np.round(vals, decimals)
-            
-            # Post-rounding gap enforcement
-            if vals[1] - vals[0] < min_gap:
-                vals[1] = vals[0] + min_gap
-            if vals[2] - vals[1] < min_gap:
-                vals[2] = vals[1] + min_gap
-            if vals[2] > s_max:
-                vals[2] = s_max
-                vals[1] = min(vals[1], round(s_max - min_gap, decimals))
-                vals[0] = min(vals[0], round(s_max - 2 * min_gap, decimals))
-            
-            vals = np.round(vals, decimals).tolist()
-            _rng.shuffle(vals)
-            return vals
-
-    # Fallback to deterministic spread if random fails due to extremely tight bounds
-    v1 = target_raw - min_gap * 1.5
-    v3 = target_raw + min_gap * 1.5
-    v2 = target_raw * 3.0 - v1 - v3
-    vals = np.clip(np.sort([v1, v2, v3]), s_min, s_max)
     vals = np.round(vals, decimals).tolist()
     _rng.shuffle(vals)
     return vals
