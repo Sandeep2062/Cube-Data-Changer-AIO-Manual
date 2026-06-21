@@ -170,47 +170,57 @@ def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
     Generate exactly 3 strength values in [s_min, s_max] whose mean is
     *approximately* target_raw, with each adjacent sorted pair >= min_gap apart.
 
-    Layout:
-        half_spread chosen so lo and hi are each >= min_gap from mid.
-        lo  = target - half_spread
-        hi  = target + half_spread
-        mid = 3*target - lo - hi   (keeps mean = target before clamping)
-
-    After clamping, the mean may shift slightly -- that is accepted.
+    Uses a random simplex sampling approach to guarantee vast randomness and 
+    avoid repetitive, predictable values, while mathematically respecting constraints.
     """
-    range_width = s_max - s_min
+    # Clamp target_raw to the mathematically solvable domain
+    min_possible_mean = s_min + min_gap
+    max_possible_mean = s_max - min_gap
+    
+    if min_possible_mean > max_possible_mean:
+        target_raw = (s_min + s_max) / 2.0
+    else:
+        target_raw = np.clip(target_raw, min_possible_mean, max_possible_mean)
+        
+    d1_min_possible = s_min - target_raw
+    d1_max_possible = -min_gap
+    
+    # Try sampling valid offsets
+    for _ in range(50):
+        d1 = _rng.uniform(d1_min_possible, d1_max_possible)
+        
+        min_d3 = max(-d1 / 2.0 + min_gap / 2.0, target_raw - s_max - d1)
+        max_d3 = min(-2.0 * d1 - min_gap, s_max - target_raw, target_raw - s_min - d1)
+        
+        if min_d3 <= max_d3:
+            d3 = _rng.uniform(min_d3, max_d3)
+            d2 = -(d1 + d3)
+            
+            vals = [target_raw + d1, target_raw + d2, target_raw + d3]
+            vals = np.round(vals, decimals)
+            
+            # Post-rounding gap enforcement
+            if vals[1] - vals[0] < min_gap:
+                vals[1] = vals[0] + min_gap
+            if vals[2] - vals[1] < min_gap:
+                vals[2] = vals[1] + min_gap
+            if vals[2] > s_max:
+                vals[2] = s_max
+                vals[1] = min(vals[1], round(s_max - min_gap, decimals))
+                vals[0] = min(vals[0], round(s_max - 2 * min_gap, decimals))
+            
+            vals = np.round(vals, decimals).tolist()
+            _rng.shuffle(vals)
+            return vals
 
-    # Spread: at least 2*min_gap, at most 65% of range
-    min_spread = 2.2 * min_gap
-    max_spread = range_width * 0.65
-    if max_spread < min_spread:
-        max_spread = min_spread
-
-    spread = _rng.uniform(min_spread, max_spread)
-    half   = spread / 2.0
-
-    j = _rng.uniform(-half * 0.08, half * 0.08)   # tiny jitter
-    lo  = target_raw - half + j
-    hi  = target_raw + half + j
-    mid = target_raw * 3.0 - lo - hi               # exact mean preservation
-
-    vals = np.clip(np.sort([lo, mid, hi]), s_min, s_max)
-    vals = np.round(vals, decimals)
-
-    # Enforce gap by nudging (forward pass)
-    if vals[1] - vals[0] < min_gap:
-        vals[1] = vals[0] + min_gap
-    if vals[2] - vals[1] < min_gap:
-        vals[2] = vals[1] + min_gap
-    # Clamp overflow (backward pass)
-    if vals[2] > s_max:
-        vals[2] = s_max
-        vals[1] = min(vals[1], round(s_max - min_gap, decimals))
-        vals[0] = min(vals[0], round(s_max - 2 * min_gap, decimals))
-
-    vals = np.round(np.clip(vals, s_min, s_max), decimals)
+    # Fallback to deterministic spread if random fails due to extremely tight bounds
+    v1 = target_raw - min_gap * 1.5
+    v3 = target_raw + min_gap * 1.5
+    v2 = target_raw * 3.0 - v1 - v3
+    vals = np.clip(np.sort([v1, v2, v3]), s_min, s_max)
+    vals = np.round(vals, decimals).tolist()
     _rng.shuffle(vals)
-    return vals.tolist()
+    return vals
 
 
 # ============================================================================
@@ -285,7 +295,7 @@ def generate_row(grade_or_type):
     """
     is_mortar    = grade_or_type in MORTAR_TYPES
     weight_gap   = 0.005 if is_mortar else 0.040
-    strength_gap = 0.01  if is_mortar else 10.0
+    strength_gap = 1.0   if is_mortar else 10.0
 
     w_min,  w_max   = WEIGHT_RANGES[grade_or_type]
     s7_min, s7_max  = STRENGTH_7D_RANGES[grade_or_type]
@@ -324,7 +334,7 @@ def generate_rows(grade_or_type, count):
     """
     is_mortar    = grade_or_type in MORTAR_TYPES
     weight_gap   = 0.005 if is_mortar else 0.040
-    strength_gap = 0.01  if is_mortar else 10.0
+    strength_gap = 1.0   if is_mortar else 10.0
 
     w_min,  w_max    = WEIGHT_RANGES[grade_or_type]
     s7_min, s7_max   = STRENGTH_7D_RANGES[grade_or_type]
