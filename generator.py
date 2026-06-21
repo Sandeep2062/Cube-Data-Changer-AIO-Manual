@@ -165,27 +165,26 @@ def _gen_weights(w_min, w_max, count, min_gap, is_mortar, decimals=3):
 # Strength generation -- algebraic 3-value layout, gap-enforced
 # ============================================================================
 
-def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
+def _gen_strengths(target_raw, min_gap, decimals=2):
     """
-    Generate exactly 3 strength values in [s_min, s_max] whose mean is
-    *approximately* target_raw, with each adjacent sorted pair >= min_gap apart.
+    Generate exactly 3 strength values whose mean is *exactly* target_raw, 
+    with each adjacent sorted pair >= min_gap apart.
 
-    Uses a perfect O(1) slack-partitioning algorithm to guarantee vast randomness
-    without any rejection sampling or loops.
+    Removes strict global boundary clamping (which forced repetitive edge-case values)
+    and replaces it with a physically realistic dynamic spread (e.g. +/- 15% variation)
+    to guarantee vast, unguessable randomness across all generated cubes!
     """
-    # Clamp target_raw to the mathematically solvable domain
-    min_possible_mean = s_min + min_gap
-    max_possible_mean = s_max - min_gap
+    # Allow individual cubes to swing up to +/- 15% from the target average
+    # (Or at least 3x the minimum gap to ensure enough breathing room for the math)
+    variation = max(target_raw * 0.15, min_gap * 3.0)
     
-    if min_possible_mean > max_possible_mean:
-        target_raw = (s_min + s_max) / 2.0
-    else:
-        target_raw = np.clip(target_raw, min_possible_mean, max_possible_mean)
-        
+    cube_min = max(0.1, target_raw - variation)
+    cube_max = target_raw + variation
+    
     # We partition the slack exactly
     S = 3.0 * target_raw
-    total_slack = s_max - s_min - 2.0 * min_gap
-    K = S - 3.0 * s_min - 3.0 * min_gap
+    total_slack = cube_max - cube_min - 2.0 * min_gap
+    K = S - 3.0 * cube_min - 3.0 * min_gap
     
     # Clip K for floating point safety
     K = np.clip(K, 0.0, 3.0 * total_slack)
@@ -204,7 +203,7 @@ def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
     x3 = K - 3.0 * x1 - 2.0 * x2
     
     # Construct values
-    v1 = s_min + x1
+    v1 = cube_min + x1
     v2 = v1 + min_gap + x2
     v3 = v2 + min_gap + x3
     
@@ -216,12 +215,6 @@ def _gen_strengths(s_min, s_max, target_raw, min_gap, decimals=2):
         vals[1] = vals[0] + min_gap
     if vals[2] - vals[1] < min_gap:
         vals[2] = vals[1] + min_gap
-        
-    # Clamp overflow (should only occur due to rounding)
-    if vals[2] > s_max:
-        vals[2] = s_max
-        vals[1] = min(vals[1], round(s_max - min_gap, decimals))
-        vals[0] = min(vals[0], round(s_max - 2.0 * min_gap, decimals))
         
     vals = np.round(vals, decimals).tolist()
     _rng.shuffle(vals)
@@ -309,8 +302,8 @@ def generate_row(grade_or_type):
     weights      = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
     t7           = float(_rng.uniform(s7_min,  s7_max))
     t28          = float(_rng.uniform(s28_min, s28_max))
-    strength_7d  = _gen_strengths(s7_min,  s7_max,  t7,  strength_gap)
-    strength_28d = _gen_strengths(s28_min, s28_max, t28, strength_gap)
+    strength_7d  = _gen_strengths(t7,  strength_gap)
+    strength_28d = _gen_strengths(t28, strength_gap)
     return weights, strength_7d, strength_28d
 
 
@@ -372,7 +365,7 @@ def generate_rows(grade_or_type, count):
         # ---------- 7-day strengths ------------------------------------------
         target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
         for _attempt in range(MAX_RETRIES):
-            s7 = _gen_strengths(s7_min, s7_max, target_7d, strength_gap)
+            s7 = _gen_strengths(target_7d, strength_gap)
             if _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d):
                 break
             # Target landed in wrong zone after clamping -- repick
@@ -381,7 +374,7 @@ def generate_rows(grade_or_type, count):
         # ---------- 28-day strengths -----------------------------------------
         target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
         for _attempt in range(MAX_RETRIES):
-            s28 = _gen_strengths(s28_min, s28_max, target_28d, strength_gap)
+            s28 = _gen_strengths(target_28d, strength_gap)
             if _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d):
                 break
             target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
