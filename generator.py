@@ -35,84 +35,28 @@ WEIGHT_RANGES = {
     "1:4": (0.800, 0.835), "1:6": (0.800, 0.835),
 }
 
-STRENGTH_7D_RANGES = {
+_BASE_STRENGTH_7D_RANGES = {
     "M10": (214.00, 267.40), "M15": (290.10, 320.50), "M20": (366.10, 410.10),
     "M25": (442.10, 490.10), "M30": (518.10, 560.10), "M35": (595.10, 632.80),
     "M40": (669.10, 728.10), "M45": (735.10, 788.10),
     "1:4": (25.20, 33.90),  "1:6": (15.20, 25.00),
 }
 
-STRENGTH_28D_RANGES = {
+_BASE_STRENGTH_28D_RANGES = {
     "M10": (320.10, 365.50), "M15": (433.10, 480.10), "M20": (547.10, 590.10),
     "M25": (660.10, 710.10), "M30": (770.10, 812.10), "M35": (880.90, 925.10),
     "M40": (995.10, 1038.10), "M45": (1105.35, 1150.10),
     "1:4": (40.60, 50.10),   "1:6": (25.20, 33.90),
 }
 
-# ── Dynamic Range Expansion for Concrete ──
-# 1 derived digit = 22.5 kN
-# 7-day: M10, M15 get +22.5 (1 digit). M20+ get +45.0 (2 digits).
-# 28-day: All concrete gets +22.5 (1 digit).
-for g in CONCRETE_GRADES:
-    # 7-day expansion
-    s_min, s_max = STRENGTH_7D_RANGES[g]
-    if g in ["M10", "M15"]:
-        STRENGTH_7D_RANGES[g] = (s_min, s_max + 22.5)
-    else:
-        STRENGTH_7D_RANGES[g] = (s_min, s_max + 45.0)
-        
-    # 28-day expansion
-    s_min, s_max = STRENGTH_28D_RANGES[g]
-    STRENGTH_28D_RANGES[g] = (s_min, s_max + 22.5)
+STRENGTH_7D_RANGES = {}
+STRENGTH_28D_RANGES = {}
 
-
-# ============================================================================
-# Derived-value helpers
-# ============================================================================
-
-def _derived_scale(is_mortar):
-    return 10.0 / 49.8 if is_mortar else 10.0 / 225.0
-
-def _derived_avg(strength_list, is_mortar):
-    """Average derived value for a list of raw kN values. Pure numpy."""
-    return float(np.mean(np.asarray(strength_list) * _derived_scale(is_mortar)))
-
-
-# ============================================================================
-# Pre-computed per-grade zone tables  (built once at import)
-# ============================================================================
-
-def _build_zone_table(s_min, s_max, is_mortar):
-    """
-    Return list of (zone_int, raw_lo, raw_hi) covering the derived range.
-    raw_lo / raw_hi are in kN.  Inward pad of 0.12 derived units keeps the
-    generated average reliably inside the zone after clamping.
-    """
-    scale = _derived_scale(is_mortar)
-    d_min = s_min * scale
-    d_max = s_max * scale
-    zones = []
-    PAD = 0.12
-    for z in range(int(d_min), int(d_max) + 2):
-        lo = max(z + PAD, d_min + 0.03)
-        hi = min(z + 1.0 - PAD, d_max - 0.03)
-        if lo < hi:
-            zones.append((z, lo / scale, hi / scale))
-    return zones
-
-_ZONE_TABLE_7D  = {g: _build_zone_table(STRENGTH_7D_RANGES[g][0], STRENGTH_7D_RANGES[g][1], g in MORTAR_TYPES) for g in ALL_TYPES}
-_ZONE_TABLE_28D = {g: _build_zone_table(STRENGTH_28D_RANGES[g][0], STRENGTH_28D_RANGES[g][1], g in MORTAR_TYPES) for g in ALL_TYPES}
-
-# Mortar: threshold = 10% of each field's own derived span, min 0.02
-def _derived_span(s_min, s_max, is_mortar):
-    return (s_max - s_min) * _derived_scale(is_mortar)
-
-_MORTAR_THRESH_7D = {
-    g: max(0.02, _derived_span(STRENGTH_7D_RANGES[g][0], STRENGTH_7D_RANGES[g][1], True)  * 0.10) for g in MORTAR_TYPES
-}
-_MORTAR_THRESH_28D = {
-    g: max(0.02, _derived_span(STRENGTH_28D_RANGES[g][0], STRENGTH_28D_RANGES[g][1], True) * 0.10) for g in MORTAR_TYPES
-}
+# Pre-computed per-grade zone tables
+_ZONE_TABLE_7D = {}
+_ZONE_TABLE_28D = {}
+_MORTAR_THRESH_7D = {}
+_MORTAR_THRESH_28D = {}
 
 
 # ============================================================================
@@ -178,8 +122,8 @@ def _gen_strengths(s_min, target_raw, min_gap, decimals=2):
     # if we enforce min_gap spacing and a hard floor of s_min.
     target_raw = max(target_raw, s_min + min_gap)
     
-    # Allow individual cubes to swing upwards by 15% to maintain vast randomness
-    variation = max(target_raw * 0.15, min_gap * 3.0)
+    # Allow individual cubes to swing upwards by 10% to maintain vast randomness
+    variation = max(target_raw * 0.10, min_gap * 3.0)
     
     cube_min = s_min
     cube_max = target_raw + variation
@@ -386,6 +330,82 @@ def generate_rows(grade_or_type, count):
         prev_avg_28d = _derived_avg(s28, is_mortar)
 
         yield weights, s7, s28
+
+def _derived_scale(is_mortar):
+    return 10.0 / 49.8 if is_mortar else 10.0 / 225.0
+
+def _derived_avg(strength_list, is_mortar):
+    """Average derived value for a list of raw kN values. Pure numpy."""
+    return float(np.mean(np.asarray(strength_list) * _derived_scale(is_mortar)))
+
+def _build_zone_table(s_min, s_max, is_mortar):
+    """
+    Return list of (zone_int, raw_lo, raw_hi) covering the derived range.
+    raw_lo / raw_hi are in kN.  Inward pad of 0.12 derived units keeps the
+    generated average reliably inside the zone after clamping.
+    """
+    scale = _derived_scale(is_mortar)
+    d_min = s_min * scale
+    d_max = s_max * scale
+    zones = []
+    PAD = 0.12
+    for z in range(int(d_min), int(d_max) + 2):
+        lo = max(z + PAD, d_min + 0.03)
+        hi = min(z + 1.0 - PAD, d_max - 0.03)
+        if lo < hi:
+            zones.append((z, lo / scale, hi / scale))
+    return zones
+
+def _derived_span(s_min, s_max, is_mortar):
+    return (s_max - s_min) * _derived_scale(is_mortar)
+
+def override_ranges(custom_7d=None, custom_28d=None):
+    """
+    Apply custom base ranges (if any) and re-initialize all dynamic expansions
+    and zone tables. Must be called before generating rows if overrides exist.
+    """
+    global STRENGTH_7D_RANGES, STRENGTH_28D_RANGES
+    global _ZONE_TABLE_7D, _ZONE_TABLE_28D
+    global _MORTAR_THRESH_7D, _MORTAR_THRESH_28D
+
+    custom_7d = custom_7d or {}
+    custom_28d = custom_28d or {}
+
+    STRENGTH_7D_RANGES.clear()
+    STRENGTH_28D_RANGES.clear()
+
+    # Load base or custom
+    for g in ALL_TYPES:
+        STRENGTH_7D_RANGES[g] = tuple(custom_7d.get(g, _BASE_STRENGTH_7D_RANGES[g]))
+        STRENGTH_28D_RANGES[g] = tuple(custom_28d.get(g, _BASE_STRENGTH_28D_RANGES[g]))
+
+    # ── Dynamic Range Expansion for Concrete ──
+    for g in CONCRETE_GRADES:
+        s_min, s_max = STRENGTH_7D_RANGES[g]
+        if g in ["M10", "M15"]:
+            STRENGTH_7D_RANGES[g] = (s_min, s_max + 22.5)
+        else:
+            STRENGTH_7D_RANGES[g] = (s_min, s_max + 45.0)
+            
+        s_min, s_max = STRENGTH_28D_RANGES[g]
+        STRENGTH_28D_RANGES[g] = (s_min, s_max + 22.5)
+
+    _ZONE_TABLE_7D.clear()
+    _ZONE_TABLE_28D.clear()
+    _MORTAR_THRESH_7D.clear()
+    _MORTAR_THRESH_28D.clear()
+
+    for g in ALL_TYPES:
+        is_m = g in MORTAR_TYPES
+        _ZONE_TABLE_7D[g] = _build_zone_table(STRENGTH_7D_RANGES[g][0], STRENGTH_7D_RANGES[g][1], is_m)
+        _ZONE_TABLE_28D[g] = _build_zone_table(STRENGTH_28D_RANGES[g][0], STRENGTH_28D_RANGES[g][1], is_m)
+
+    for g in MORTAR_TYPES:
+        _MORTAR_THRESH_7D[g] = max(0.02, _derived_span(STRENGTH_7D_RANGES[g][0], STRENGTH_7D_RANGES[g][1], True) * 0.10)
+        _MORTAR_THRESH_28D[g] = max(0.02, _derived_span(STRENGTH_28D_RANGES[g][0], STRENGTH_28D_RANGES[g][1], True) * 0.10)
+
+# Initialize defaults on import
+override_ranges()
 
 
 def grade_display_name(grade_or_type):

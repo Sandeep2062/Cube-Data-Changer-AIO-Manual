@@ -102,6 +102,9 @@ class CubeDataChangerAIO:
         saved_cm = s.get("cell_map", {})
         self.cell_map = dict(DEFAULT_CELL_MAP)
         self.cell_map.update(saved_cm)
+        # Custom limits
+        self.custom_ranges_7d = s.get("custom_ranges_7d", {})
+        self.custom_ranges_28d = s.get("custom_ranges_28d", {})
 
     def _save_settings(self):
         app_settings.save({
@@ -111,6 +114,8 @@ class CubeDataChangerAIO:
             "mode":            self.mode_var.get(),
             "grade_files":     getattr(self, "legacy_grade_files", []),
             "cell_map":        self.cell_map,
+            "custom_ranges_7d": self.custom_ranges_7d,
+            "custom_ranges_28d": self.custom_ranges_28d,
         })
 
     # ── UI Construction ─────────────────────────────────────────────────────
@@ -261,12 +266,23 @@ class CubeDataChangerAIO:
                      font=ctk.CTkFont(size=13),
                      text_color=TEXT_DIM).pack(side="left", padx=(12, 0), pady=(6, 0))
 
+        # Buttons Container
+        btns_container = ctk.CTkFrame(header, fg_color="transparent")
+        btns_container.pack(side="right")
+
         # Cell Configuration button
-        ctk.CTkButton(header, text="⚙  Cell Configuration", width=180, height=36,
+        ctk.CTkButton(btns_container, text="⚙  Cell Config", width=130, height=36,
                        font=ctk.CTkFont(size=13, weight="bold"),
                        fg_color=ORANGE, hover_color="#d97706",
                        text_color="white", corner_radius=8,
-                       command=self._open_cell_config).pack(side="right", padx=(12, 0))
+                       command=self._open_cell_config).pack(side="left", padx=(12, 0))
+
+        # Grade Limits button
+        ctk.CTkButton(btns_container, text="⚙  Grade Limits", width=130, height=36,
+                       font=ctk.CTkFont(size=13, weight="bold"),
+                       fg_color="#8b5cf6", hover_color="#7c3aed",
+                       text_color="white", corner_radius=8,
+                       command=self._open_limits_config).pack(side="left", padx=(12, 0))
 
         # ── File picker cards ───────────────────────────────────────────────
         cards_frame = ctk.CTkFrame(main, fg_color="transparent")
@@ -579,6 +595,109 @@ class CubeDataChangerAIO:
                        text_color="white",
                        command=save_and_close).pack(side="right")
 
+    # ── Grade Limits Dialog ──────────────────────────────────────────────────
+
+    def _open_limits_config(self):
+        import generator
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Grade Limits")
+        dialog.geometry("560x680")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=BG_DARK)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 560) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 680) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="⚙  Grade Limits",
+                     font=ctk.CTkFont(size=20, weight="bold"),
+                     text_color=TEXT_PRIMARY).pack(padx=20, pady=(20, 4))
+        ctk.CTkLabel(dialog, text="Override default min/max ranges for 7-day and 28-day strengths",
+                     font=ctk.CTkFont(size=12),
+                     text_color=TEXT_DIM).pack(padx=20, pady=(0, 16))
+
+        content = ctk.CTkScrollableFrame(dialog, fg_color=BG_CARD, corner_radius=10,
+                                          border_width=1, border_color=BORDER_COLOR)
+        content.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        content.grid_columnconfigure(0, weight=1)
+
+        entries = {}
+
+        for grade in generator.ALL_TYPES:
+            fr = ctk.CTkFrame(content, fg_color="transparent")
+            fr.pack(fill="x", padx=10, pady=8)
+            ctk.CTkLabel(fr, text=f"{grade}",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=ACCENT).pack(anchor="w")
+
+            row_fr = ctk.CTkFrame(fr, fg_color="transparent")
+            row_fr.pack(fill="x", pady=4)
+
+            # Load existing overrides or default
+            b7 = generator._BASE_STRENGTH_7D_RANGES[grade]
+            b28 = generator._BASE_STRENGTH_28D_RANGES[grade]
+            
+            c7 = self.custom_ranges_7d.get(grade, b7)
+            c28 = self.custom_ranges_28d.get(grade, b28)
+
+            def make_entry(parent, label, val):
+                ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 2))
+                var = ctk.StringVar(value=str(round(val, 2)))
+                ctk.CTkEntry(parent, textvariable=var, width=50, height=28,
+                             font=ctk.CTkFont(size=11), fg_color="#27272a", border_color=BORDER_COLOR).pack(side="left", padx=(0, 10))
+                return var
+
+            entries[grade] = {
+                "7d_min": make_entry(row_fr, "7D Min:", c7[0]),
+                "7d_max": make_entry(row_fr, "7D Max:", c7[1]),
+                "28d_min": make_entry(row_fr, "28D Min:", c28[0]),
+                "28d_max": make_entry(row_fr, "28D Max:", c28[1])
+            }
+            
+            ctk.CTkFrame(content, height=1, fg_color=BORDER_COLOR).pack(fill="x", padx=20, pady=2)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(0, 16))
+
+        def reset_defaults():
+            for g, d in entries.items():
+                d["7d_min"].set(str(generator._BASE_STRENGTH_7D_RANGES[g][0]))
+                d["7d_max"].set(str(generator._BASE_STRENGTH_7D_RANGES[g][1]))
+                d["28d_min"].set(str(generator._BASE_STRENGTH_28D_RANGES[g][0]))
+                d["28d_max"].set(str(generator._BASE_STRENGTH_28D_RANGES[g][1]))
+
+        def save_and_close():
+            for g, d in entries.items():
+                try:
+                    v7_min = float(d["7d_min"].get())
+                    v7_max = float(d["7d_max"].get())
+                    v28_min = float(d["28d_min"].get())
+                    v28_max = float(d["28d_max"].get())
+                    if v7_min >= v7_max or v28_min >= v28_max:
+                        raise ValueError()
+                        
+                    # Save override
+                    self.custom_ranges_7d[g] = [v7_min, v7_max]
+                    self.custom_ranges_28d[g] = [v28_min, v28_max]
+                except ValueError:
+                    messagebox.showerror("Invalid Value", f"Invalid ranges for {g}. Min must be less than Max.", parent=dialog)
+                    return
+            self._save_settings()
+            dialog.destroy()
+
+        ctk.CTkButton(btn_frame, text="Reset Defaults", width=140, height=38,
+                       font=ctk.CTkFont(size=13, weight="bold"),
+                       fg_color="#3f3f46", hover_color="#52525b",
+                       command=reset_defaults).pack(side="left")
+        ctk.CTkButton(btn_frame, text="Save & Close", width=140, height=38,
+                       font=ctk.CTkFont(size=13, weight="bold"),
+                       fg_color=GREEN, hover_color=GREEN_HOVER,
+                       text_color="white",
+                       command=save_and_close).pack(side="right")
+
     # ── Legacy grade file management ────────────────────────────────────────
 
     def _add_legacy_files(self):
@@ -703,6 +822,9 @@ class CubeDataChangerAIO:
 
         def worker():
             try:
+                import generator
+                generator.override_ranges(self.custom_ranges_7d, self.custom_ranges_28d)
+                
                 total = process(
                     office_file=self.office_path.get(),
                     output_folder=self.output_path.get(),
