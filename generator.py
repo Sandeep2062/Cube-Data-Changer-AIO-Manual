@@ -15,6 +15,7 @@ Optimisations
 """
 
 import numpy as np
+from collections import deque
 
 # Module-level RNG -- faster than calling np.random.* global functions
 _rng = np.random.default_rng()
@@ -106,183 +107,117 @@ def _gen_weights(w_min, w_max, count, min_gap, is_mortar, decimals=3):
 
 
 # ============================================================================
-# Strength generation -- algebraic 3-value layout, gap-enforced
+# Strength generation -- wide-spread, random, gap-enforced
 # ============================================================================
 
 def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
-                   used_values=None):
+                   used_values=None, forbidden_decimals=None):
     """
-    Generate exactly 3 strength values whose mean is *exactly* target_raw, 
+    Generate exactly 3 strength values whose mean is close to *target_raw*, 
     with each adjacent sorted pair >= min_gap apart.
 
     Hard-clamps all values to [s_min, s_max] so they NEVER exceed the range.
-    Variation is kept to 2% above the target for tight, realistic data.
     
     Ensures:
-    - Each value has a UNIQUE decimal part (e.g. 276.1, 302.5, 257.9 -- not
-      276.1, 266.1, 296.1 where .1 repeats).
+    - Each value has a UNIQUE decimal part (e.g. 276.15, 302.53, 257.89 -- not
+      276.10, 266.10, 296.10 where .10 repeats).
+    - Decimal parts also don't conflict with forbidden_decimals (from the other
+      triplet on the same sheet).
     - No value repeats any previously generated value (via used_values set).
+    - Values are widely spread within the range for maximum randomness.
     """
-    # Math constraint: The average cannot possibly be lower than s_min + min_gap 
-    # if we enforce min_gap spacing and a hard floor of s_min.
+    if s_max is None:
+        s_max = target_raw * 1.02
+        
     target_raw = max(target_raw, s_min + min_gap)
+    target_raw = min(target_raw, s_max)
     
-    # Allow individual cubes to swing upwards by only 2% (not 10%)
-    variation = max(target_raw * 0.02, min_gap * 2.0)
-    
-    cube_min = s_min
-    cube_max = target_raw + variation
-    
-    # Hard-clamp cube_max to never exceed the range ceiling
-    if s_max is not None:
-        cube_max = min(cube_max, s_max)
-    
-    # If target itself exceeds s_max, pull it back
-    if s_max is not None and target_raw > s_max:
-        target_raw = s_max
-        cube_max = s_max
-    
-    # We partition the slack exactly
-    S = 3.0 * target_raw
-    total_slack = cube_max - cube_min - 2.0 * min_gap
-    
-    # Safety: if range is too tight, relax slightly
-    if total_slack < 0:
-        total_slack = 0.0
-    
-    K = S - 3.0 * cube_min - 3.0 * min_gap
-    
-    # Clip K for floating point safety
-    K = np.clip(K, 0.0, 3.0 * total_slack)
-    
-    # x1 represents the slack of the lowest value
-    x1_min = max(0.0, K - 2.0 * total_slack)
-    x1_max = K / 3.0
-    if x1_max < x1_min:
-        x1_max = x1_min
-    x1 = _rng.uniform(x1_min, x1_max)
-    
-    # x2 represents the slack of the middle value
-    x2_min = max(0.0, K - total_slack - 2.0 * x1)
-    x2_max = (K - 3.0 * x1) / 2.0
-    if x2_max < x2_min:
-        x2_max = x2_min
-    x2 = _rng.uniform(x2_min, x2_max)
-    
-    # x3 represents the slack of the highest value
-    x3 = K - 3.0 * x1 - 2.0 * x2
-    
-    # Construct values
-    v1 = cube_min + x1
-    v2 = v1 + min_gap + x2
-    v3 = v2 + min_gap + x3
-    
-    vals = [v1, v2, v3]
-    
-    # Hard-clamp every value to [s_min, s_max]
-    if s_max is not None:
-        vals = [max(s_min, min(v, s_max)) for v in vals]
-    
-    vals = np.round(vals, decimals)
-    
-    # Enforce gaps post-rounding strictly
-    if vals[1] - vals[0] < min_gap:
-        vals[1] = vals[0] + min_gap
-    if vals[2] - vals[1] < min_gap:
-        vals[2] = vals[1] + min_gap
-    
-    # Final hard-clamp again after gap enforcement
-    if s_max is not None:
-        vals = [max(s_min, min(v, s_max)) for v in vals]
-    
-    vals = np.round(vals, decimals).tolist()
-    
-    # ── Enforce unique decimal parts AND no value repetition ──
-    # Run both checks in a loop since fixing one can break the other.
-    for _combined in range(20):
-        vals = _enforce_unique_decimals(vals, s_min, s_max, min_gap, decimals)
-        if used_values is not None:
-            vals = _enforce_no_repeats(vals, used_values, s_min, s_max, min_gap, decimals)
+    if forbidden_decimals is None:
+        forbidden_decimals = set()
+    if used_values is None:
+        used_values = set()
         
-        # Verify both constraints
-        dec_parts = [_get_decimal_part(v, decimals) for v in vals]
-        decimals_ok = len(set(dec_parts)) == len(dec_parts)
-        repeats_ok = used_values is None or all(v not in used_values for v in vals)
+    range_span = s_max - s_min
+    
+    best_vals = None
+    step = 10 ** (-decimals)
+    
+    for _overall_attempt in range(50):
+        # Generate random base
+        zone_width = range_span / 3.0
+        v1 = _rng.uniform(s_min, s_min + zone_width)
+        v2 = _rng.uniform(s_min + zone_width, s_min + 2.0 * zone_width)
+        v3 = _rng.uniform(s_min + 2.0 * zone_width, s_max)
         
-        if decimals_ok and repeats_ok:
+        vals = sorted([v1, v2, v3])
+        
+        # Shift to target
+        shift = target_raw - (sum(vals) / 3.0)
+        vals = [v + shift for v in vals]
+        
+        success = False
+        
+        for _nudge_attempt in range(20):
+            # 1. Clamp
+            vals = [max(s_min, min(v, s_max)) for v in vals]
+            vals = sorted(vals)
+            
+            # 2. Gap (add a tiny random fractional amount so they don't lock into exact integers)
+            if vals[1] - vals[0] < min_gap:
+                vals[1] = vals[0] + min_gap + _rng.uniform(1.0, 99.0) * step
+            if vals[2] - vals[1] < min_gap:
+                vals[2] = vals[1] + min_gap + _rng.uniform(1.0, 99.0) * step
+                
+            if vals[2] > s_max:
+                excess = vals[2] - s_max
+                vals[2] = s_max
+                vals[1] -= excess
+                vals[0] -= excess
+                vals = [max(s_min, v) for v in vals]
+                
+            vals = [round(v, decimals) for v in vals]
+            vals = sorted(vals)
+            
+            # 3. Check discrete constraints
+            dec_parts = [_get_decimal_part(v, decimals) for v in vals]
+            unique_dec = len(set(dec_parts)) == 3
+            no_forbid_dec = all(dp not in forbidden_decimals for dp in dec_parts)
+            no_used_val = all(v not in used_values for v in vals)
+            
+            # Re-check gaps after rounding just in case
+            gaps_ok = (vals[1] - vals[0] >= min_gap - 1e-9) and (vals[2] - vals[1] >= min_gap - 1e-9)
+            
+            if unique_dec and no_forbid_dec and no_used_val and gaps_ok and vals[2] <= s_max and vals[0] >= s_min:
+                success = True
+                break
+                
+            # Nudge violators
+            for i in range(3):
+                dp = dec_parts[i]
+                v = vals[i]
+                if dec_parts.count(dp) > 1 or dp in forbidden_decimals or v in used_values or not gaps_ok:
+                    direction = _rng.choice([-1, 1])
+                    nudge = step * _rng.integers(1, 30)
+                    vals[i] += direction * nudge
+        
+        if success:
+            best_vals = vals
             break
-    
-    if used_values is not None:
-        for v in vals:
-            used_values.add(v)
-    
-    _rng.shuffle(vals)
-    return vals
+            
+    if best_vals is None:
+        best_vals = vals
+        
+    for v in best_vals:
+        used_values.add(v)
+        
+    _rng.shuffle(best_vals)
+    return best_vals
 
 
 def _get_decimal_part(value, decimals=2):
     """Extract the decimal portion of a float. e.g. 276.15 -> 15, 302.50 -> 50"""
     multiplier = 10 ** decimals
     return round(value * multiplier) % multiplier
-
-
-def _enforce_unique_decimals(vals, s_min, s_max, min_gap, decimals=2):
-    """
-    Nudge values so that no two share the same decimal part.
-    e.g. [276.1, 266.1, 296.1] is invalid because all end in .1
-    """
-    step = 10 ** (-decimals)  # 0.01 for decimals=2
-    max_attempts = 50
-    
-    for attempt in range(max_attempts):
-        dec_parts = [_get_decimal_part(v, decimals) for v in vals]
-        if len(set(dec_parts)) == len(dec_parts):
-            return vals  # All unique
-        
-        # Find duplicates and nudge them
-        seen = {}
-        for i, dp in enumerate(dec_parts):
-            if dp in seen:
-                # Nudge this value by a random small amount to change its decimal
-                direction = _rng.choice([-1, 1])
-                nudge = step * _rng.integers(1, 10)  # 0.01 to 0.09
-                new_val = round(vals[i] + direction * nudge, decimals)
-                
-                # Respect bounds
-                if s_max is not None:
-                    new_val = min(new_val, s_max)
-                new_val = max(new_val, s_min)
-                
-                vals[i] = new_val
-            else:
-                seen[dp] = i
-        
-        vals = sorted(vals)
-        vals = np.round(vals, decimals).tolist()
-    
-    return vals
-
-
-def _enforce_no_repeats(vals, used_values, s_min, s_max, min_gap, decimals=2):
-    """
-    Nudge any value that has been used before so it becomes unique.
-    """
-    step = 10 ** (-decimals)
-    max_attempts = 50
-    
-    for i in range(len(vals)):
-        attempts = 0
-        while vals[i] in used_values and attempts < max_attempts:
-            direction = _rng.choice([-1, 1])
-            nudge = step * _rng.integers(1, 5)
-            new_val = round(vals[i] + direction * nudge, decimals)
-            if s_max is not None:
-                new_val = min(new_val, s_max)
-            new_val = max(new_val, s_min)
-            vals[i] = new_val
-            attempts += 1
-    
-    return vals
 
 
 # ============================================================================
@@ -341,6 +276,15 @@ def _avg_differs(vals, prev_avg, is_mortar, mortar_threshold):
         return int(avg) != int(prev_avg)
 
 
+def _derived_avg_unique(avg, recent_avgs, decimals=2):
+    """
+    Check that this derived average (rounded to `decimals`) has not appeared
+    in the recent_avgs deque. Returns True if unique.
+    """
+    rounded = round(avg, decimals)
+    return rounded not in recent_avgs
+
+
 # ============================================================================
 # Public API
 # ============================================================================
@@ -367,7 +311,10 @@ def generate_row(grade_or_type):
     t7           = float(_rng.uniform(s7_min,  s7_max))
     t28          = float(_rng.uniform(s28_min, s28_max))
     strength_7d  = _gen_strengths(s7_min, t7,  strength_gap, s_max=s7_max)
-    strength_28d = _gen_strengths(s28_min, t28, strength_gap, s_max=s28_max)
+    # Pass 7d decimal parts as forbidden for 28d to avoid cross-triplet dups
+    dec_7d = {_get_decimal_part(v) for v in strength_7d}
+    strength_28d = _gen_strengths(s28_min, t28, strength_gap, s_max=s28_max,
+                                   forbidden_decimals=dec_7d)
     return weights, strength_7d, strength_28d
 
 
@@ -378,14 +325,17 @@ def generate_rows(grade_or_type, count):
     Per-sheet guarantees
     --------------------
     * Weights  : min gap >= 0.040 kg (concrete) / >= 0.005 kg (mortar)
-    * Strengths: min gap >= 10.0 kN (concrete)  / all distinct (mortar)
-    * All values within the defined range for the grade/type.
+    * Strengths: min gap >= 10.0 kN (concrete)  / >= 1.0 kN (mortar)
+    * All values strictly within the defined range for the grade/type.
+    * All 6 strength values on a sheet have UNIQUE decimal parts.
 
     Cross-sheet guarantee
     ---------------------
     * The derived average (raw_kN / 225 * 10) of BOTH 7-day and 28-day
       strengths has a DIFFERENT INTEGER PART on consecutive sheets (concrete),
       or differs by >= threshold on consecutive sheets (mortar).
+    * The rounded derived average cannot repeat within 10 consecutive sheets.
+    * No exact strength value repeats across any sheet in the file.
 
     Performance
     -----------
@@ -410,8 +360,11 @@ def generate_rows(grade_or_type, count):
     prev_avg_7d  = None
     prev_avg_28d = None
     prev_weights = set()
-    used_7d_values  = set()  # Track ALL generated 7d values across sheets
-    used_28d_values = set()  # Track ALL generated 28d values across sheets
+    used_7d_values  = set()   # Track ALL generated 7d values across sheets
+    used_28d_values = set()   # Track ALL generated 28d values across sheets
+    # Track recent derived averages -- same average can't repeat within 10 sheets
+    recent_avgs_7d  = deque(maxlen=10)
+    recent_avgs_28d = deque(maxlen=10)
 
     MAX_RETRIES = 15
 
@@ -430,25 +383,41 @@ def generate_rows(grade_or_type, count):
 
         # ---------- 7-day strengths ------------------------------------------
         target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
+        s7 = None
         for _attempt in range(MAX_RETRIES):
             s7 = _gen_strengths(s7_min, target_7d, strength_gap,
                                 s_max=s7_max, used_values=used_7d_values)
-            if _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d):
+            avg_7d = _derived_avg(s7, is_mortar)
+            zone_ok = _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d)
+            unique_ok = _derived_avg_unique(avg_7d, recent_avgs_7d)
+            if zone_ok and unique_ok:
                 break
-            # Target landed in wrong zone after clamping -- repick
+            # Target landed in wrong zone or avg repeated -- repick
             target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
 
         # ---------- 28-day strengths -----------------------------------------
+        # Pass 7d decimal parts as forbidden so all 6 values have unique decimals
+        dec_7d = {_get_decimal_part(v) for v in s7}
+        
         target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
+        s28 = None
         for _attempt in range(MAX_RETRIES):
             s28 = _gen_strengths(s28_min, target_28d, strength_gap,
-                                 s_max=s28_max, used_values=used_28d_values)
-            if _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d):
+                                 s_max=s28_max, used_values=used_28d_values,
+                                 forbidden_decimals=dec_7d)
+            avg_28d = _derived_avg(s28, is_mortar)
+            zone_ok = _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d)
+            unique_ok = _derived_avg_unique(avg_28d, recent_avgs_28d)
+            if zone_ok and unique_ok:
                 break
             target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
 
         prev_avg_7d  = _derived_avg(s7, is_mortar)
         prev_avg_28d = _derived_avg(s28, is_mortar)
+        
+        # Track rounded averages for the 10-sheet uniqueness window
+        recent_avgs_7d.append(round(prev_avg_7d, 2))
+        recent_avgs_28d.append(round(prev_avg_28d, 2))
 
         yield weights, s7, s28
 
@@ -500,9 +469,10 @@ def override_ranges(custom_7d=None, custom_28d=None):
         STRENGTH_7D_RANGES[g] = tuple(custom_7d.get(g, _BASE_STRENGTH_7D_RANGES[g]))
         STRENGTH_28D_RANGES[g] = tuple(custom_28d.get(g, _BASE_STRENGTH_28D_RANGES[g]))
 
-    # ── Dynamic Range Expansion for Concrete ──
+    # ── Dynamic Range Expansion for Concrete ONLY ──
     # Expand by ~2% of base max to give the generator just enough headroom
     # for cross-sheet zone variation without exceeding realistic limits.
+    # MORTAR gets NO expansion -- stays at exact base limits.
     for g in CONCRETE_GRADES:
         s_min, s_max = STRENGTH_7D_RANGES[g]
         expansion_7d = round(s_max * 0.02, 2)  # 2% of base max
