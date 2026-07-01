@@ -435,8 +435,20 @@ def _build_zone_table(s_min, s_max, is_mortar):
     generated average reliably inside the zone after clamping.
     """
     scale = _derived_scale(is_mortar)
-    d_min = s_min * scale
-    d_max = s_max * scale
+    min_gap = 1.0 if is_mortar else 10.0
+    
+    # The absolute lowest and highest possible mean values
+    # given the strict min_gap between the 3 values.
+    lowest_mean = s_min + min_gap
+    highest_mean = s_max - min_gap
+    
+    # If the range is extremely tight, collapse to the midpoint
+    if lowest_mean > highest_mean:
+        lowest_mean = highest_mean = (s_min + s_max) / 2.0
+    
+    d_min = lowest_mean * scale
+    d_max = highest_mean * scale
+    
     zones = []
     PAD = 0.12
     for z in range(int(d_min), int(d_max) + 2):
@@ -469,11 +481,14 @@ def override_ranges(custom_7d=None, custom_28d=None):
         STRENGTH_7D_RANGES[g] = tuple(custom_7d.get(g, _BASE_STRENGTH_7D_RANGES[g]))
         STRENGTH_28D_RANGES[g] = tuple(custom_28d.get(g, _BASE_STRENGTH_28D_RANGES[g]))
 
-    # ── Dynamic Range Expansion for Concrete ONLY ──
+    # ── Dynamic Range Expansion for Concrete > M20 ONLY ──
     # Expand by ~2% of base max to give the generator just enough headroom
     # for cross-sheet zone variation without exceeding realistic limits.
-    # MORTAR gets NO expansion -- stays at exact base limits.
+    # MORTAR and M10/M15/M20 get NO expansion -- they stay at exact base limits.
     for g in CONCRETE_GRADES:
+        if g in ["M10", "M15", "M20"]:
+            continue  # Do not expand limits for M20 and below
+            
         s_min, s_max = STRENGTH_7D_RANGES[g]
         expansion_7d = round(s_max * 0.02, 2)  # 2% of base max
         STRENGTH_7D_RANGES[g] = (s_min, s_max + expansion_7d)
