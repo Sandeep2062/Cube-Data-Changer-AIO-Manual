@@ -289,29 +289,28 @@ def _derived_avg_unique(avg, recent_avgs, decimals=2):
 
 def generate_row(grade_or_type):
     """
-    Generate a single row of test data for the given grade / mortar type.
-
-    Returns
-    -------
-    weights      : list[float]  -- 6 values
-    strength_7d  : list[float]  -- 3 values
-    strength_28d : list[float]  -- 3 values
+    Generate a single random row with no cross-sheet constraints.
+    Used by the preview function and quick-generation modes.
     """
     is_mortar    = grade_or_type in MORTAR_TYPES
     weight_gap   = 0.005 if is_mortar else 0.040
     strength_gap = 1.0   if is_mortar else 10.0
+    dec_places   = 2 if is_mortar else 1  # Concrete=1 decimal, Mortar=2 decimals
 
-    w_min,  w_max   = WEIGHT_RANGES[grade_or_type]
-    s7_min, s7_max  = STRENGTH_7D_RANGES[grade_or_type]
+    w_min,  w_max    = WEIGHT_RANGES[grade_or_type]
+    s7_min, s7_max   = STRENGTH_7D_RANGES[grade_or_type]
     s28_min, s28_max = STRENGTH_28D_RANGES[grade_or_type]
 
-    weights      = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
+    weights = _gen_weights(w_min, w_max, 6, weight_gap, is_mortar)
+
     t7           = float(_rng.uniform(s7_min,  s7_max))
     t28          = float(_rng.uniform(s28_min, s28_max))
-    strength_7d  = _gen_strengths(s7_min, t7,  strength_gap, s_max=s7_max)
+    strength_7d  = _gen_strengths(s7_min, t7,  strength_gap, s_max=s7_max,
+                                   decimals=dec_places)
     # Pass 7d decimal parts as forbidden for 28d to avoid cross-triplet dups
-    dec_7d = {_get_decimal_part(v) for v in strength_7d}
+    dec_7d = {_get_decimal_part(v, dec_places) for v in strength_7d}
     strength_28d = _gen_strengths(s28_min, t28, strength_gap, s_max=s28_max,
+                                   decimals=dec_places,
                                    forbidden_decimals=dec_7d)
     return weights, strength_7d, strength_28d
 
@@ -345,6 +344,7 @@ def generate_rows(grade_or_type, count):
     is_mortar    = grade_or_type in MORTAR_TYPES
     weight_gap   = 0.005 if is_mortar else 0.040
     strength_gap = 1.0   if is_mortar else 10.0
+    dec_places   = 2 if is_mortar else 1  # Concrete=1 decimal, Mortar=2 decimals
 
     w_min,  w_max    = WEIGHT_RANGES[grade_or_type]
     s7_min, s7_max   = STRENGTH_7D_RANGES[grade_or_type]
@@ -384,7 +384,8 @@ def generate_rows(grade_or_type, count):
         s7 = None
         for _attempt in range(MAX_RETRIES):
             s7 = _gen_strengths(s7_min, target_7d, strength_gap,
-                                s_max=s7_max, used_values=used_7d_values)
+                                s_max=s7_max, decimals=dec_places,
+                                used_values=used_7d_values)
             avg_7d = _derived_avg(s7, is_mortar)
             zone_ok = _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d)
             unique_ok = _derived_avg_unique(avg_7d, recent_avgs_7d)
@@ -395,13 +396,14 @@ def generate_rows(grade_or_type, count):
 
         # ---------- 28-day strengths -----------------------------------------
         # Pass 7d decimal parts as forbidden so all 6 values have unique decimals
-        dec_7d = {_get_decimal_part(v) for v in s7}
+        dec_7d = {_get_decimal_part(v, dec_places) for v in s7}
         
         target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
         s28 = None
         for _attempt in range(MAX_RETRIES):
             s28 = _gen_strengths(s28_min, target_28d, strength_gap,
-                                 s_max=s28_max, used_values=used_28d_values,
+                                 s_max=s28_max, decimals=dec_places,
+                                 used_values=used_28d_values,
                                  forbidden_decimals=dec_7d)
             avg_28d = _derived_avg(s28, is_mortar)
             zone_ok = _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d)
