@@ -139,6 +139,11 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         
     range_span = s_max - s_min
     
+    # Prevent infinite loops due to overcrowding when generating many sheets.
+    # If used_values consumes too much of the possible valid space, we must clear it.
+    if len(used_values) > range_span * 3:
+        used_values.clear()
+    
     best_vals = None
     step = 10 ** (-decimals)
     
@@ -206,6 +211,16 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
             
     if best_vals is None:
         best_vals = vals
+        
+        # Absolute fallback: if we failed all attempts and the values are perfectly 
+        # spaced exactly at the min_gap, break the exact spacing to prevent repeating .1s
+        if round(best_vals[1] - best_vals[0], decimals) == min_gap:
+            best_vals[1] += _rng.uniform(1.0, 99.0) * step
+        if round(best_vals[2] - best_vals[1], decimals) == min_gap:
+            best_vals[2] += _rng.uniform(1.0, 99.0) * step
+            
+        best_vals = [round(max(s_min, min(v, s_max)), decimals) for v in best_vals]
+        best_vals = sorted(best_vals)
         
     for v in best_vals:
         used_values.add(v)
