@@ -113,18 +113,15 @@ def _gen_weights(w_min, w_max, count, min_gap, is_mortar, decimals=3):
 def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
                    used_values=None, forbidden_decimals=None):
     """
-    Generate exactly 3 strength values whose mean is close to *target_raw*, 
-    with each adjacent sorted pair >= min_gap apart.
-
-    Hard-clamps all values to [s_min, s_max] so they NEVER exceed the range.
+    Generate exactly 3 strength values whose mean is close to *target_raw*.
     
-    Ensures:
-    - Each value has a UNIQUE decimal part (e.g. 276.15, 302.53, 257.89 -- not
-      276.10, 266.10, 296.10 where .10 repeats).
-    - Decimal parts also don't conflict with forbidden_decimals (from the other
-      triplet on the same sheet).
-    - No value repeats any previously generated value (via used_values set).
-    - Values are widely spread within the range for maximum randomness.
+    Each adjacent sorted pair must have AT LEAST a randomized minimum gap:
+      - Concrete: minimum gap randomized between 10.00 and 12.48
+      - Mortar:   minimum gap randomized between 1.00 and 1.50
+    
+    Values CAN be much further apart than the minimum gap — they are scattered
+    randomly across the full [s_min, s_max] range for natural-looking data.
+    Example output: 305.26, 338.45, 290.15 (gaps of 15.11 and 33.19, both >= 10)
     """
     if s_max is None:
         s_max = target_raw * 1.02
@@ -139,88 +136,74 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         
     range_span = s_max - s_min
     
-    # Prevent infinite loops due to overcrowding when generating many sheets.
-    # If used_values consumes too much of the possible valid space, we must clear it.
+    # Safely clear tracker to prevent impossible loops for 1000s of sheets
     if len(used_values) > range_span * 3:
         used_values.clear()
     
     best_vals = None
     step = 10 ** (-decimals)
     
-    for _overall_attempt in range(50):
-        # Generate random base
-        zone_width = range_span / 3.0
-        v1 = _rng.uniform(s_min, s_min + zone_width)
-        v2 = _rng.uniform(s_min + zone_width, s_min + 2.0 * zone_width)
-        v3 = _rng.uniform(s_min + 2.0 * zone_width, s_max)
+    # The MINIMUM gap between each adjacent sorted pair is randomized in this range
+    if min_gap >= 10.0:
+        mgap_lo, mgap_hi = 10.00, 12.48
+    else:
+        mgap_lo, mgap_hi = min_gap, min_gap + 0.50
         
+    for _overall_attempt in range(5000):
+        # Pick a random minimum gap for this attempt
+        req_gap = _rng.uniform(mgap_lo, mgap_hi)
+        
+        # Generate 3 fully random values across the entire range
+        v1 = _rng.uniform(s_min, s_max)
+        v2 = _rng.uniform(s_min, s_max)
+        v3 = _rng.uniform(s_min, s_max)
         vals = sorted([v1, v2, v3])
         
-        # Shift to target
-        shift = target_raw - (sum(vals) / 3.0)
+        # Enforce minimum gap: push values apart if they're too close
+        if vals[1] - vals[0] < req_gap:
+            vals[1] = vals[0] + req_gap + _rng.uniform(0, range_span * 0.3)
+        if vals[2] - vals[1] < req_gap:
+            vals[2] = vals[1] + req_gap + _rng.uniform(0, range_span * 0.3)
+        
+        # Shift the whole triplet so the mean hits target_raw
+        current_mean = sum(vals) / 3.0
+        shift = target_raw - current_mean
         vals = [v + shift for v in vals]
         
-        success = False
+        # Clamp to hard boundaries
+        if vals[0] < s_min:
+            shift = s_min - vals[0]
+            vals = [v + shift for v in vals]
+        if vals[2] > s_max:
+            shift = s_max - vals[2]
+            vals = [v + shift for v in vals]
+            
+        # Round to correct decimals
+        vals = [round(v, decimals) for v in vals]
+        vals = sorted(vals)
         
-        for _nudge_attempt in range(20):
-            # 1. Clamp
-            vals = [max(s_min, min(v, s_max)) for v in vals]
-            vals = sorted(vals)
-            
-            # 2. Gap (add a tiny random fractional amount so they don't lock into exact integers)
-            if vals[1] - vals[0] < min_gap:
-                vals[1] = vals[0] + min_gap + _rng.uniform(1.0, 99.0) * step
-            if vals[2] - vals[1] < min_gap:
-                vals[2] = vals[1] + min_gap + _rng.uniform(1.0, 99.0) * step
-                
-            if vals[2] > s_max:
-                excess = vals[2] - s_max
-                vals[2] = s_max
-                vals[1] -= excess
-                vals[0] -= excess
-                vals = [max(s_min, v) for v in vals]
-                
-            vals = [round(v, decimals) for v in vals]
-            vals = sorted(vals)
-            
-            # 3. Check discrete constraints
-            dec_parts = [_get_decimal_part(v, decimals) for v in vals]
-            unique_dec = len(set(dec_parts)) == 3
-            no_forbid_dec = all(dp not in forbidden_decimals for dp in dec_parts)
-            no_used_val = all(v not in used_values for v in vals)
-            
-            # Re-check gaps after rounding just in case
-            gaps_ok = (vals[1] - vals[0] >= min_gap - 1e-9) and (vals[2] - vals[1] >= min_gap - 1e-9)
-            
-            if unique_dec and no_forbid_dec and no_used_val and gaps_ok and vals[2] <= s_max and vals[0] >= s_min:
-                success = True
-                break
-                
-            # Nudge violators
-            for i in range(3):
-                dp = dec_parts[i]
-                v = vals[i]
-                if dec_parts.count(dp) > 1 or dp in forbidden_decimals or v in used_values or not gaps_ok:
-                    direction = _rng.choice([-1, 1])
-                    nudge = step * _rng.integers(1, 30)
-                    vals[i] += direction * nudge
+        # Verify minimum gaps after rounding
+        gap1 = round(vals[1] - vals[0], decimals)
+        gap2 = round(vals[2] - vals[1], decimals)
+        if gap1 < mgap_lo - 0.01 or gap2 < mgap_lo - 0.01:
+            continue
         
-        if success:
+        # Verify hard boundaries
+        if vals[0] < s_min or vals[2] > s_max:
+            continue
+            
+        # Verify discrete uniqueness constraints
+        dec_parts = [_get_decimal_part(v, decimals) for v in vals]
+        unique_dec = len(set(dec_parts)) == 3
+        no_forbid_dec = all(dp not in forbidden_decimals for dp in dec_parts)
+        no_used_val = all(v not in used_values for v in vals)
+        
+        if unique_dec and no_forbid_dec and no_used_val:
             best_vals = vals
             break
             
     if best_vals is None:
-        best_vals = vals
-        
-        # Absolute fallback: if we failed all attempts and the values are perfectly 
-        # spaced exactly at the min_gap, break the exact spacing to prevent repeating .1s
-        if round(best_vals[1] - best_vals[0], decimals) == min_gap:
-            best_vals[1] += _rng.uniform(1.0, 99.0) * step
-        if round(best_vals[2] - best_vals[1], decimals) == min_gap:
-            best_vals[2] += _rng.uniform(1.0, 99.0) * step
-            
-        best_vals = [round(max(s_min, min(v, s_max)), decimals) for v in best_vals]
-        best_vals = sorted(best_vals)
+        best_vals = vals  # Extremely rare fallback
         
     for v in best_vals:
         used_values.add(v)
@@ -452,10 +435,13 @@ def _build_zone_table(s_min, s_max, is_mortar):
     scale = _derived_scale(is_mortar)
     min_gap = 1.0 if is_mortar else 10.0
     
+    # Account for the new maximum gap (12.48 for concrete, 1.50 for mortar)
+    max_gap_diff = 2.5 if not is_mortar else 0.5
+    
     # The absolute lowest and highest possible mean values
-    # given the strict min_gap between the 3 values.
-    lowest_mean = s_min + min_gap
-    highest_mean = s_max - min_gap
+    # given the randomized mathematical gap between the 3 values.
+    lowest_mean = s_min + min_gap + max_gap_diff
+    highest_mean = s_max - min_gap - max_gap_diff
     
     # If the range is extremely tight, collapse to the midpoint
     if lowest_mean > highest_mean:
