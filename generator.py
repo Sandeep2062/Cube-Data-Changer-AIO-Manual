@@ -308,6 +308,13 @@ def _avg_differs(vals, prev_avg, is_mortar, mortar_threshold):
     return abs(avg - prev_avg) >= 0.05
 
 
+def _avg_band_differs(vals, prev_avg, is_mortar):
+    """Prefer a different displayed integer band when concrete has room."""
+    if prev_avg is None or is_mortar:
+        return True
+    return int(_display_avg(vals, is_mortar)) != int(round(prev_avg, 2))
+
+
 def _derived_avg_unique(avg, recent_avgs, decimals=2):
     """
     Check that this derived average (rounded to `decimals`) has not appeared
@@ -426,15 +433,19 @@ def generate_rows(grade_or_type, count):
         # ---------- 7-day strengths ------------------------------------------
         target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
         s7 = None
+        band_attempts_7d = 0
         for _attempt in range(MAX_RETRIES):
             s7 = _gen_strengths(s7_min, target_7d, strength_gap,
                                 s_max=s7_max, decimals=dec_places,
                                 used_values=used_7d_values)
             avg_7d = _derived_avg(s7, is_mortar)
             zone_ok = _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d)
+            band_ok = _avg_band_differs(s7, prev_avg_7d, is_mortar)
             unique_ok = _display_avg_allowed(s7, is_mortar, recent_avgs_7d)
-            if zone_ok and unique_ok:
+            if zone_ok and unique_ok and (band_ok or band_attempts_7d >= 35):
                 break
+            if not band_ok:
+                band_attempts_7d += 1
             # Target landed in wrong zone or avg repeated -- repick
             target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
         else:
@@ -448,6 +459,7 @@ def generate_rows(grade_or_type, count):
         
         target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
         s28 = None
+        band_attempts_28d = 0
         for _attempt in range(MAX_RETRIES):
             s28 = _gen_strengths(s28_min, target_28d, strength_gap,
                                  s_max=s28_max, decimals=dec_places,
@@ -455,9 +467,12 @@ def generate_rows(grade_or_type, count):
                                  forbidden_decimals=dec_7d)
             avg_28d = _derived_avg(s28, is_mortar)
             zone_ok = _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d)
+            band_ok = _avg_band_differs(s28, prev_avg_28d, is_mortar)
             unique_ok = _display_avg_allowed(s28, is_mortar, recent_avgs_28d)
-            if zone_ok and unique_ok:
+            if zone_ok and unique_ok and (band_ok or band_attempts_28d >= 35):
                 break
+            if not band_ok:
+                band_attempts_28d += 1
             target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
         else:
             s28 = _force_unique_display_average(
@@ -558,16 +573,17 @@ def override_ranges(custom_7d=None, custom_28d=None):
         STRENGTH_7D_RANGES[g] = tuple(custom_7d.get(g, _BASE_STRENGTH_7D_RANGES[g]))
         STRENGTH_28D_RANGES[g] = tuple(custom_28d.get(g, _BASE_STRENGTH_28D_RANGES[g]))
 
-    # -- Dynamic Range Expansion for Concrete > M20 ONLY --
-    # M25 gets only 1% headroom; higher concrete grades keep 2% headroom
-    # for cross-sheet zone variation without exceeding realistic limits.
-    # MORTAR and M10/M15/M20 get NO expansion -- they stay at exact base limits.
+    # -- Dynamic Range Expansion for Concrete ONLY --
+    # Tight lower grades need adaptive headroom; otherwise their displayed
+    # averages get trapped in one band (for example M15 7-day stays 13.xx).
+    # Mortar gets NO expansion and remains strictly inside its base limits.
     for g in CONCRETE_GRADES:
         if g in ["M10", "M15", "M20"]:
-            continue  # Do not expand limits for M20 and below
+            variation = 0.05
+        else:
+            variation = 0.01 if g == "M25" else 0.02
             
         s_min, s_max = STRENGTH_7D_RANGES[g]
-        variation = 0.01 if g == "M25" else 0.02
         expansion_7d = round(s_max * variation, 2)
         STRENGTH_7D_RANGES[g] = (s_min, s_max + expansion_7d)
             
