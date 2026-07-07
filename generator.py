@@ -317,6 +317,16 @@ def _derived_avg_unique(avg, recent_avgs, decimals=2):
     return rounded not in recent_avgs
 
 
+def _display_avg(strength_list, is_mortar):
+    """Average as displayed by the sheet formula, rounded to 2 decimals."""
+    return round(_derived_avg(strength_list, is_mortar), 2)
+
+
+def _display_avg_allowed(strength_list, is_mortar, recent_avgs):
+    """True when the final displayed average has not appeared recently."""
+    return _display_avg(strength_list, is_mortar) not in recent_avgs
+
+
 # ============================================================================
 # Public API
 # ============================================================================
@@ -398,7 +408,7 @@ def generate_rows(grade_or_type, count):
     recent_avgs_7d  = deque(maxlen=10)
     recent_avgs_28d = deque(maxlen=10)
 
-    MAX_RETRIES = 15
+    MAX_RETRIES = 80
 
     for _ in range(count):
         # ---------- Weights (ensure no cross-sheet overlap) ------------------
@@ -422,11 +432,15 @@ def generate_rows(grade_or_type, count):
                                 used_values=used_7d_values)
             avg_7d = _derived_avg(s7, is_mortar)
             zone_ok = _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d)
-            unique_ok = _derived_avg_unique(avg_7d, recent_avgs_7d)
+            unique_ok = _display_avg_allowed(s7, is_mortar, recent_avgs_7d)
             if zone_ok and unique_ok:
                 break
             # Target landed in wrong zone or avg repeated -- repick
             target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
+        else:
+            s7 = _force_unique_display_average(
+                s7_min, s7_max, target_7d, strength_gap, dec_places,
+                is_mortar, recent_avgs_7d, used_7d_values)
 
         # ---------- 28-day strengths -----------------------------------------
         # Pass 7d decimal parts as forbidden so all 6 values have unique decimals
@@ -441,17 +455,22 @@ def generate_rows(grade_or_type, count):
                                  forbidden_decimals=dec_7d)
             avg_28d = _derived_avg(s28, is_mortar)
             zone_ok = _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d)
-            unique_ok = _derived_avg_unique(avg_28d, recent_avgs_28d)
+            unique_ok = _display_avg_allowed(s28, is_mortar, recent_avgs_28d)
             if zone_ok and unique_ok:
                 break
             target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
+        else:
+            s28 = _force_unique_display_average(
+                s28_min, s28_max, target_28d, strength_gap, dec_places,
+                is_mortar, recent_avgs_28d, used_28d_values,
+                forbidden_decimals=dec_7d)
 
         prev_avg_7d  = _derived_avg(s7, is_mortar)
         prev_avg_28d = _derived_avg(s28, is_mortar)
         
         # Track rounded averages for the 10-sheet uniqueness window
-        recent_avgs_7d.append(round(prev_avg_7d, 2))
-        recent_avgs_28d.append(round(prev_avg_28d, 2))
+        recent_avgs_7d.append(_display_avg(s7, is_mortar))
+        recent_avgs_28d.append(_display_avg(s28, is_mortar))
 
         yield weights, s7, s28
 
@@ -461,6 +480,23 @@ def _derived_scale(is_mortar):
 def _derived_avg(strength_list, is_mortar):
     """Average derived value for a list of raw kN values. Pure numpy."""
     return float(np.mean(np.asarray(strength_list) * _derived_scale(is_mortar)))
+
+
+def _force_unique_display_average(s_min, s_max, target_raw, strength_gap,
+                                  decimals, is_mortar, recent_avgs,
+                                  used_values, forbidden_decimals=None):
+    """Generate until the final C30/F30-style average is different."""
+    for _ in range(500):
+        vals = _gen_strengths(
+            s_min, target_raw, strength_gap, s_max=s_max,
+            decimals=decimals, used_values=used_values,
+            forbidden_decimals=forbidden_decimals)
+        if _display_avg_allowed(vals, is_mortar, recent_avgs):
+            return vals
+
+    # The average space is usually large, but if a custom range is extremely
+    # tight, return the best bounded row rather than breaking generation.
+    return vals
 
 def _build_zone_table(s_min, s_max, is_mortar):
     """

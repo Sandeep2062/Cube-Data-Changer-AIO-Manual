@@ -20,7 +20,7 @@ All-in-one tool for generating and processing concrete and mortar cube test data
 	- **Random Minimum Gaps**: Concrete strength gaps use a random minimum from `10.00` to `12.70` kN; mortar uses `1.68` to `2.32` kN. Values can be much farther apart for natural spread.
 	- **Concrete/Mortar Decimals**: Concrete strengths use 1 decimal place; mortar strengths use 2 decimal places.
 	- **Unique Decimals**: Prevents all 6 strength values on a sheet from sharing the same decimal part (e.g. no repeating `.1` / `.10` pattern).
-	- **10-Sheet Average Cooldown**: Derived averages are tracked and mathematically prevented from repeating within 10 consecutive sheets.
+	- **10-Sheet Average Cooldown**: Final displayed averages like `C30` and `F30` are calculated from the generated 3 values and prevented from repeating within 10 consecutive sheets.
 	- **Large Mixed Workbooks**: Auto-detect mode supports workbooks containing mixed concrete grades and mortar sheets, including batches of 1000+ sheets.
 - Apply calendar dates (7-day and 28-day)
 - Legacy mode for existing grade Excel files
