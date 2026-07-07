@@ -568,13 +568,13 @@ def override_ranges(custom_7d=None, custom_28d=None):
         s_min, s_max = STRENGTH_7D_RANGES[g]
         if s_max - s_min < 54.0:
             deficit = 54.0 - (s_max - s_min)
-            STRENGTH_7D_RANGES[g] = (round(s_min - deficit/2, 2), round(s_max + deficit/2, 2))
+            STRENGTH_7D_RANGES[g] = (s_min, round(s_max + deficit, 2))
             
         # 28-day
         s_min, s_max = STRENGTH_28D_RANGES[g]
         if s_max - s_min < 54.0:
             deficit = 54.0 - (s_max - s_min)
-            STRENGTH_28D_RANGES[g] = (round(s_min - deficit/2, 2), round(s_max + deficit/2, 2))
+            STRENGTH_28D_RANGES[g] = (s_min, round(s_max + deficit, 2))
 
     _ZONE_TABLE_7D.clear()
     _ZONE_TABLE_28D.clear()
