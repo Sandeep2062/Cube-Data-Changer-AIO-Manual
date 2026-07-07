@@ -119,7 +119,6 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
     
     Values CAN be much further apart than the minimum gap — they are scattered
     randomly across the full [s_min, s_max] range for natural-looking data.
-    Example output: 305.26, 338.45, 290.15 (gaps of 15.11 and 33.19, both >= 10)
     """
     if s_max is None:
         s_max = target_raw * 1.02
@@ -133,16 +132,13 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         used_values = set()
         
     range_span = s_max - s_min
-    step = 10 ** (-decimals)
     
-    # Safely clear tracker to prevent impossible loops for 1000s of sheets.
-    # Concrete now has 1 decimal place, so tight grades only have a few hundred
-    # possible values in total.
-    value_slots = max(1, int(range_span / step))
-    if len(used_values) > value_slots * 0.35:
+    # Safely clear tracker to prevent impossible loops for 1000s of sheets
+    if len(used_values) > range_span * 3:
         used_values.clear()
     
     best_vals = None
+    step = 10 ** (-decimals)
     
     # The MINIMUM gap between each adjacent sorted pair is randomized in this range
     if min_gap >= 10.0:
@@ -150,39 +146,43 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
     else:
         mgap_lo, mgap_hi = 1.68, 2.32
         
-    for _overall_attempt in range(350):
-        req_gap = _round_up(_rng.uniform(mgap_lo, mgap_hi), decimals)
-        if s_max - s_min < 2.0 * req_gap:
-            req_gap = _round_down((s_max - s_min) / 2.0, decimals)
-
-        # Generate random sorted values with guaranteed minimum gaps by
-        # sampling compressed points, then adding the reserved gap back.
-        compressed_max = s_max - 2.0 * req_gap
-        if compressed_max < s_min:
-            continue
-        compressed = np.sort(_rng.uniform(s_min, compressed_max, 3))
-        vals = [
-            compressed[0],
-            compressed[1] + req_gap,
-            compressed[2] + 2.0 * req_gap,
-        ]
-
-        # Lightly bias toward the selected target without allowing any clamp
-        # operation to create out-of-bounds or too-close values.
+    for _overall_attempt in range(5000):
+        # Pick a random minimum gap for this attempt
+        req_gap = _rng.uniform(mgap_lo, mgap_hi)
+        
+        # Generate 3 fully random values across the entire range
+        v1 = _rng.uniform(s_min, s_max)
+        v2 = _rng.uniform(s_min, s_max)
+        v3 = _rng.uniform(s_min, s_max)
+        vals = sorted([v1, v2, v3])
+        
+        # Enforce minimum gap: push values apart if they're too close
+        if vals[1] - vals[0] < req_gap:
+            vals[1] = vals[0] + req_gap + _rng.uniform(0, range_span * 0.3)
+        if vals[2] - vals[1] < req_gap:
+            vals[2] = vals[1] + req_gap + _rng.uniform(0, range_span * 0.3)
+        
+        # Shift the whole triplet so the EXACT mean perfectly hits target_raw
         current_mean = sum(vals) / 3.0
-        max_shift_down = s_min - vals[0]
-        max_shift_up = s_max - vals[2]
-        wanted_shift = (target_raw - current_mean) * 0.35
-        shift = min(max(wanted_shift, max_shift_down), max_shift_up)
+        shift = target_raw - current_mean
         vals = [v + shift for v in vals]
-
-        vals = [float(round(v, decimals)) for v in vals]
+        
+        # Clamp to hard boundaries
+        if vals[0] < s_min:
+            shift = s_min - vals[0]
+            vals = [v + shift for v in vals]
+        if vals[2] > s_max:
+            shift = s_max - vals[2]
+            vals = [v + shift for v in vals]
+            
+        # Round to correct decimals
+        vals = [round(v, decimals) for v in vals]
         vals = sorted(vals)
         
         # Verify minimum gaps after rounding
         gap1 = round(vals[1] - vals[0], decimals)
         gap2 = round(vals[2] - vals[1], decimals)
-        if gap1 < req_gap or gap2 < req_gap:
+        if gap1 < mgap_lo - 0.01 or gap2 < mgap_lo - 0.01:
             continue
         
         # Verify hard boundaries
@@ -198,13 +198,9 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         if unique_dec and no_forbid_dec and no_used_val:
             best_vals = vals
             break
-        if unique_dec and no_forbid_dec and _overall_attempt > 80:
-            best_vals = vals
-            break
             
     if best_vals is None:
-        best_vals = _fallback_strengths(s_min, s_max, mgap_lo, decimals,
-                                        forbidden_decimals, used_values)
+        best_vals = vals  # Extremely rare fallback
         
     for v in best_vals:
         used_values.add(v)
@@ -229,28 +225,7 @@ def _round_down(value, decimals):
     return math.floor(value * multiplier) / multiplier
 
 
-def _fallback_strengths(s_min, s_max, min_gap, decimals, forbidden_decimals, used_values):
-    """Last-resort bounded generator; still never exceeds strength limits."""
-    gap = _round_up(min_gap, decimals)
-    low = round(s_min, decimals)
-    high = round(s_max, decimals)
-    step = 10 ** (-decimals)
 
-    for _ in range(1000):
-        first_hi = high - 2.0 * gap
-        if first_hi < low:
-            break
-        v1 = round(float(_rng.uniform(low, first_hi)), decimals)
-        v2 = round(float(_rng.uniform(v1 + gap, high - gap)), decimals)
-        v3 = round(float(_rng.uniform(v2 + gap, high)), decimals)
-        vals = sorted([v1, v2, v3])
-        dec_parts = [_get_decimal_part(v, decimals) for v in vals]
-        if len(set(dec_parts)) == 3 and all(dp not in forbidden_decimals for dp in dec_parts):
-            return vals
-
-    vals = [low, round(low + gap, decimals), round(low + 2.0 * gap, decimals)]
-    vals = [float(min(max(v, low), high)) for v in vals]
-    return vals
 
 
 # ============================================================================
