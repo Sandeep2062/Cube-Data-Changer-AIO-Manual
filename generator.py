@@ -14,6 +14,7 @@ Optimisations
 * Minimal retry for strength cross-sheet constraint (capped at 15, typically 1-2).
 """
 
+import math
 import numpy as np
 from collections import deque
 
@@ -69,39 +70,36 @@ def _gen_weights(w_min, w_max, count, min_gap, is_mortar, decimals=3):
     Generate *count* weights in [w_min, w_max] with every adjacent sorted pair
     at least *min_gap* apart.
 
-    Uses a perfect random placement algorithm:
-    1. Calculate required width for gaps.
-    2. Expand w_max dynamically if there is not enough slack for randomness.
-    3. Generate sorted random points in the slack space.
+    Uses a bounded random placement algorithm. It never expands w_max; if the
+    configured gap is too large for the configured range, the largest feasible
+    gap for that range is used.
     """
-    required_width = (count - 1) * min_gap
+    range_span = w_max - w_min
+    if count <= 1:
+        return [round(float(_rng.uniform(w_min, w_max)), decimals)]
+
+    effective_gap = min(min_gap, range_span / (count - 1))
+    required_width = (count - 1) * effective_gap
     slack = w_max - w_min - required_width
-    
-    # Ensure there is enough slack so the weights are highly random
-    # instead of ending exactly in 0s.
-    min_slack = 0.005 if is_mortar else 0.040
-    if slack < min_slack:
-        w_max = w_min + required_width + min_slack
-        slack = min_slack
 
     random_sorted = np.sort(_rng.uniform(0, slack, count))
-    pts = w_min + random_sorted + np.arange(count) * min_gap
+    pts = w_min + random_sorted + np.arange(count) * effective_gap
     pts = np.round(pts, decimals)
     
     # Enforce minimum gap exactly post-rounding
     for i in range(1, count):
-        if pts[i] - pts[i - 1] < min_gap:
-            pts[i] = pts[i - 1] + min_gap
+        if pts[i] - pts[i - 1] < effective_gap:
+            pts[i] = pts[i - 1] + effective_gap
             
-    # Clamp if nudging pushed it past the expanded w_max
+    # Clamp if rounding/nudging touched the upper boundary.
     if pts[-1] > w_max:
         pts -= (pts[-1] - w_max)
         pts = np.round(pts, decimals)
         for i in range(1, count):
-            if pts[i] - pts[i - 1] < min_gap:
-                pts[i] = pts[i - 1] + min_gap
+            if pts[i] - pts[i - 1] < effective_gap:
+                pts[i] = pts[i - 1] + effective_gap
 
-    pts = np.round(pts, decimals).tolist()
+    pts = np.clip(np.round(pts, decimals), w_min, w_max).tolist()
     _rng.shuffle(pts)
     return pts
 
@@ -116,8 +114,8 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
     Generate exactly 3 strength values whose mean is close to *target_raw*.
     
     Each adjacent sorted pair must have AT LEAST a randomized minimum gap:
-      - Concrete: minimum gap randomized between 10.00 and 12.48
-      - Mortar:   minimum gap randomized between 1.00 and 1.50
+      - Concrete: minimum gap randomized between 10.00 and 12.70
+      - Mortar:   minimum gap randomized between 1.68 and 2.32
     
     Values CAN be much further apart than the minimum gap — they are scattered
     randomly across the full [s_min, s_max] range for natural-looking data.
@@ -135,57 +133,56 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         used_values = set()
         
     range_span = s_max - s_min
+    step = 10 ** (-decimals)
     
-    # Safely clear tracker to prevent impossible loops for 1000s of sheets
-    if len(used_values) > range_span * 3:
+    # Safely clear tracker to prevent impossible loops for 1000s of sheets.
+    # Concrete now has 1 decimal place, so tight grades only have a few hundred
+    # possible values in total.
+    value_slots = max(1, int(range_span / step))
+    if len(used_values) > value_slots * 0.35:
         used_values.clear()
     
     best_vals = None
-    step = 10 ** (-decimals)
     
     # The MINIMUM gap between each adjacent sorted pair is randomized in this range
     if min_gap >= 10.0:
-        mgap_lo, mgap_hi = 10.00, 12.48
+        mgap_lo, mgap_hi = 10.00, 12.70
     else:
-        mgap_lo, mgap_hi = min_gap, min_gap + 0.50
+        mgap_lo, mgap_hi = 1.68, 2.32
         
-    for _overall_attempt in range(5000):
-        # Pick a random minimum gap for this attempt
-        req_gap = _rng.uniform(mgap_lo, mgap_hi)
-        
-        # Generate 3 fully random values across the entire range
-        v1 = _rng.uniform(s_min, s_max)
-        v2 = _rng.uniform(s_min, s_max)
-        v3 = _rng.uniform(s_min, s_max)
-        vals = sorted([v1, v2, v3])
-        
-        # Enforce minimum gap: push values apart if they're too close
-        if vals[1] - vals[0] < req_gap:
-            vals[1] = vals[0] + req_gap + _rng.uniform(0, range_span * 0.3)
-        if vals[2] - vals[1] < req_gap:
-            vals[2] = vals[1] + req_gap + _rng.uniform(0, range_span * 0.3)
-        
-        # Shift the whole triplet so the mean hits target_raw
+    for _overall_attempt in range(350):
+        req_gap = _round_up(_rng.uniform(mgap_lo, mgap_hi), decimals)
+        if s_max - s_min < 2.0 * req_gap:
+            req_gap = _round_down((s_max - s_min) / 2.0, decimals)
+
+        # Generate random sorted values with guaranteed minimum gaps by
+        # sampling compressed points, then adding the reserved gap back.
+        compressed_max = s_max - 2.0 * req_gap
+        if compressed_max < s_min:
+            continue
+        compressed = np.sort(_rng.uniform(s_min, compressed_max, 3))
+        vals = [
+            compressed[0],
+            compressed[1] + req_gap,
+            compressed[2] + 2.0 * req_gap,
+        ]
+
+        # Lightly bias toward the selected target without allowing any clamp
+        # operation to create out-of-bounds or too-close values.
         current_mean = sum(vals) / 3.0
-        shift = target_raw - current_mean
+        max_shift_down = s_min - vals[0]
+        max_shift_up = s_max - vals[2]
+        wanted_shift = (target_raw - current_mean) * 0.35
+        shift = min(max(wanted_shift, max_shift_down), max_shift_up)
         vals = [v + shift for v in vals]
-        
-        # Clamp to hard boundaries
-        if vals[0] < s_min:
-            shift = s_min - vals[0]
-            vals = [v + shift for v in vals]
-        if vals[2] > s_max:
-            shift = s_max - vals[2]
-            vals = [v + shift for v in vals]
-            
-        # Round to correct decimals
-        vals = [round(v, decimals) for v in vals]
+
+        vals = [float(round(v, decimals)) for v in vals]
         vals = sorted(vals)
         
         # Verify minimum gaps after rounding
         gap1 = round(vals[1] - vals[0], decimals)
         gap2 = round(vals[2] - vals[1], decimals)
-        if gap1 < mgap_lo - 0.01 or gap2 < mgap_lo - 0.01:
+        if gap1 < req_gap or gap2 < req_gap:
             continue
         
         # Verify hard boundaries
@@ -201,9 +198,13 @@ def _gen_strengths(s_min, target_raw, min_gap, s_max=None, decimals=2,
         if unique_dec and no_forbid_dec and no_used_val:
             best_vals = vals
             break
+        if unique_dec and no_forbid_dec and _overall_attempt > 80:
+            best_vals = vals
+            break
             
     if best_vals is None:
-        best_vals = vals  # Extremely rare fallback
+        best_vals = _fallback_strengths(s_min, s_max, mgap_lo, decimals,
+                                        forbidden_decimals, used_values)
         
     for v in best_vals:
         used_values.add(v)
@@ -216,6 +217,40 @@ def _get_decimal_part(value, decimals=2):
     """Extract the decimal portion of a float. e.g. 276.15 -> 15, 302.50 -> 50"""
     multiplier = 10 ** decimals
     return round(value * multiplier) % multiplier
+
+
+def _round_up(value, decimals):
+    multiplier = 10 ** decimals
+    return math.ceil(value * multiplier) / multiplier
+
+
+def _round_down(value, decimals):
+    multiplier = 10 ** decimals
+    return math.floor(value * multiplier) / multiplier
+
+
+def _fallback_strengths(s_min, s_max, min_gap, decimals, forbidden_decimals, used_values):
+    """Last-resort bounded generator; still never exceeds strength limits."""
+    gap = _round_up(min_gap, decimals)
+    low = round(s_min, decimals)
+    high = round(s_max, decimals)
+    step = 10 ** (-decimals)
+
+    for _ in range(1000):
+        first_hi = high - 2.0 * gap
+        if first_hi < low:
+            break
+        v1 = round(float(_rng.uniform(low, first_hi)), decimals)
+        v2 = round(float(_rng.uniform(v1 + gap, high - gap)), decimals)
+        v3 = round(float(_rng.uniform(v2 + gap, high)), decimals)
+        vals = sorted([v1, v2, v3])
+        dec_parts = [_get_decimal_part(v, decimals) for v in vals]
+        if len(set(dec_parts)) == 3 and all(dp not in forbidden_decimals for dp in dec_parts):
+            return vals
+
+    vals = [low, round(low + gap, decimals), round(low + 2.0 * gap, decimals)]
+    vals = [float(min(max(v, low), high)) for v in vals]
+    return vals
 
 
 # ============================================================================
@@ -270,8 +305,7 @@ def _avg_differs(vals, prev_avg, is_mortar, mortar_threshold):
     avg = _derived_avg(vals, is_mortar)
     if is_mortar:
         return abs(avg - prev_avg) >= mortar_threshold
-    else:
-        return int(avg) != int(prev_avg)
+    return abs(avg - prev_avg) >= 0.05
 
 
 def _derived_avg_unique(avg, recent_avgs, decimals=2):
@@ -437,8 +471,9 @@ def _build_zone_table(s_min, s_max, is_mortar):
     scale = _derived_scale(is_mortar)
     min_gap = 1.0 if is_mortar else 10.0
     
-    # Account for the new maximum gap (12.48 for concrete, 1.50 for mortar)
-    max_gap_diff = 2.5 if not is_mortar else 0.5
+    # Account for randomized minimum gaps: 10.00-12.70 concrete,
+    # 1.68-2.32 mortar.
+    max_gap_diff = 2.7 if not is_mortar else 1.32
     
     # The absolute lowest and highest possible mean values
     # given the randomized mathematical gap between the 3 values.
@@ -459,6 +494,9 @@ def _build_zone_table(s_min, s_max, is_mortar):
         hi = min(z + 1.0 - PAD, d_max - 0.03)
         if lo < hi:
             zones.append((z, lo / scale, hi / scale))
+    if not zones:
+        midpoint = (lowest_mean + highest_mean) / 2.0
+        zones.append((int(midpoint * scale), midpoint, midpoint))
     return zones
 
 def _derived_span(s_min, s_max, is_mortar):
@@ -484,8 +522,8 @@ def override_ranges(custom_7d=None, custom_28d=None):
         STRENGTH_7D_RANGES[g] = tuple(custom_7d.get(g, _BASE_STRENGTH_7D_RANGES[g]))
         STRENGTH_28D_RANGES[g] = tuple(custom_28d.get(g, _BASE_STRENGTH_28D_RANGES[g]))
 
-    # ── Dynamic Range Expansion for Concrete > M20 ONLY ──
-    # Expand by ~2% of base max to give the generator just enough headroom
+    # -- Dynamic Range Expansion for Concrete > M20 ONLY --
+    # M25 gets only 1% headroom; higher concrete grades keep 2% headroom
     # for cross-sheet zone variation without exceeding realistic limits.
     # MORTAR and M10/M15/M20 get NO expansion -- they stay at exact base limits.
     for g in CONCRETE_GRADES:
@@ -493,11 +531,12 @@ def override_ranges(custom_7d=None, custom_28d=None):
             continue  # Do not expand limits for M20 and below
             
         s_min, s_max = STRENGTH_7D_RANGES[g]
-        expansion_7d = round(s_max * 0.02, 2)  # 2% of base max
+        variation = 0.01 if g == "M25" else 0.02
+        expansion_7d = round(s_max * variation, 2)
         STRENGTH_7D_RANGES[g] = (s_min, s_max + expansion_7d)
             
         s_min, s_max = STRENGTH_28D_RANGES[g]
-        expansion_28d = round(s_max * 0.02, 2)  # 2% of base max
+        expansion_28d = round(s_max * variation, 2)
         STRENGTH_28D_RANGES[g] = (s_min, s_max + expansion_28d)
 
     _ZONE_TABLE_7D.clear()
