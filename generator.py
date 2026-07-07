@@ -305,7 +305,8 @@ def _avg_differs(vals, prev_avg, is_mortar, mortar_threshold):
     avg = _derived_avg(vals, is_mortar)
     if is_mortar:
         return abs(avg - prev_avg) >= mortar_threshold
-    return abs(avg - prev_avg) >= 0.05
+    # For concrete, the integer part MUST differ on consecutive sheets.
+    return int(avg) != int(prev_avg)
 
 
 def _avg_band_differs(vals, prev_avg, is_mortar):
@@ -433,25 +434,17 @@ def generate_rows(grade_or_type, count):
         # ---------- 7-day strengths ------------------------------------------
         target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
         s7 = None
-        band_attempts_7d = 0
         for _attempt in range(MAX_RETRIES):
             s7 = _gen_strengths(s7_min, target_7d, strength_gap,
                                 s_max=s7_max, decimals=dec_places,
                                 used_values=used_7d_values)
             avg_7d = _derived_avg(s7, is_mortar)
             zone_ok = _avg_differs(s7, prev_avg_7d, is_mortar, m_thresh_7d)
-            band_ok = _avg_band_differs(s7, prev_avg_7d, is_mortar)
             unique_ok = _display_avg_allowed(s7, is_mortar, recent_avgs_7d)
-            if zone_ok and unique_ok and (band_ok or band_attempts_7d >= 35):
+            if zone_ok and unique_ok:
                 break
-            if not band_ok:
-                band_attempts_7d += 1
             # Target landed in wrong zone or avg repeated -- repick
             target_7d = _pick_target(zt7, prev_avg_7d, is_mortar, m_thresh_7d)
-        else:
-            s7 = _force_unique_display_average(
-                s7_min, s7_max, target_7d, strength_gap, dec_places,
-                is_mortar, recent_avgs_7d, used_7d_values)
 
         # ---------- 28-day strengths -----------------------------------------
         # Pass 7d decimal parts as forbidden so all 6 values have unique decimals
@@ -459,7 +452,6 @@ def generate_rows(grade_or_type, count):
         
         target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
         s28 = None
-        band_attempts_28d = 0
         for _attempt in range(MAX_RETRIES):
             s28 = _gen_strengths(s28_min, target_28d, strength_gap,
                                  s_max=s28_max, decimals=dec_places,
@@ -467,18 +459,10 @@ def generate_rows(grade_or_type, count):
                                  forbidden_decimals=dec_7d)
             avg_28d = _derived_avg(s28, is_mortar)
             zone_ok = _avg_differs(s28, prev_avg_28d, is_mortar, m_thresh_28d)
-            band_ok = _avg_band_differs(s28, prev_avg_28d, is_mortar)
             unique_ok = _display_avg_allowed(s28, is_mortar, recent_avgs_28d)
-            if zone_ok and unique_ok and (band_ok or band_attempts_28d >= 35):
+            if zone_ok and unique_ok:
                 break
-            if not band_ok:
-                band_attempts_28d += 1
             target_28d = _pick_target(zt28, prev_avg_28d, is_mortar, m_thresh_28d)
-        else:
-            s28 = _force_unique_display_average(
-                s28_min, s28_max, target_28d, strength_gap, dec_places,
-                is_mortar, recent_avgs_28d, used_28d_values,
-                forbidden_decimals=dec_7d)
 
         prev_avg_7d  = _derived_avg(s7, is_mortar)
         prev_avg_28d = _derived_avg(s28, is_mortar)
@@ -576,20 +560,21 @@ def override_ranges(custom_7d=None, custom_28d=None):
     # -- Dynamic Range Expansion for Concrete ONLY --
     # Tight lower grades need adaptive headroom; otherwise their displayed
     # averages get trapped in one band (for example M15 7-day stays 13.xx).
-    # Mortar gets NO expansion and remains strictly inside its base limits.
+    # We expand the bounds OUTWARD until they are wide enough to guarantee
+    # multiple integer zones.
+    # We need (s_max - s_min - 25.4) * 10 / 225 > 1.2  =>  s_max - s_min > 52.4
     for g in CONCRETE_GRADES:
-        if g in ["M10", "M15", "M20"]:
-            variation = 0.05
-        else:
-            variation = 0.01 if g == "M25" else 0.02
-            
+        # 7-day
         s_min, s_max = STRENGTH_7D_RANGES[g]
-        expansion_7d = round(s_max * variation, 2)
-        STRENGTH_7D_RANGES[g] = (s_min, s_max + expansion_7d)
+        if s_max - s_min < 54.0:
+            deficit = 54.0 - (s_max - s_min)
+            STRENGTH_7D_RANGES[g] = (round(s_min - deficit/2, 2), round(s_max + deficit/2, 2))
             
+        # 28-day
         s_min, s_max = STRENGTH_28D_RANGES[g]
-        expansion_28d = round(s_max * variation, 2)
-        STRENGTH_28D_RANGES[g] = (s_min, s_max + expansion_28d)
+        if s_max - s_min < 54.0:
+            deficit = 54.0 - (s_max - s_min)
+            STRENGTH_28D_RANGES[g] = (round(s_min - deficit/2, 2), round(s_max + deficit/2, 2))
 
     _ZONE_TABLE_7D.clear()
     _ZONE_TABLE_28D.clear()
