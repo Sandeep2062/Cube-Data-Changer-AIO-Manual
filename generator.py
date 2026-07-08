@@ -320,7 +320,7 @@ def generate_row(grade_or_type):
     Used by the preview function and quick-generation modes.
     """
     is_mortar    = grade_or_type in MORTAR_TYPES
-    weight_gap   = 0.005 if is_mortar else 0.040
+    weight_gap   = 0.005 if is_mortar else 0.010
     strength_gap = 1.0   if is_mortar else 10.0
     dec_places   = 2 if is_mortar else 1  # Concrete=1 decimal, Mortar=2 decimals
 
@@ -369,7 +369,7 @@ def generate_rows(grade_or_type, count):
     * Single module-level numpy RNG instance.
     """
     is_mortar    = grade_or_type in MORTAR_TYPES
-    weight_gap   = 0.005 if is_mortar else 0.040
+    weight_gap   = 0.005 if is_mortar else 0.010
     strength_gap = 1.0   if is_mortar else 10.0
     dec_places   = 2 if is_mortar else 1  # Concrete=1 decimal, Mortar=2 decimals
 
